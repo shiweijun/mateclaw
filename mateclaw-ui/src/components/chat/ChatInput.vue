@@ -136,14 +136,16 @@
           <el-icon><Paperclip /></el-icon>
         </button>
 
-        <!-- 深度思考开关 -->
+        <!-- 深度思考开关 (RFC-049 PR-1-UI: 不支持 reasoning_effort 的模型灰态) -->
         <button
           type="button"
           class="action-btn thinking-btn"
-          :class="{ active: thinkingEnabled }"
-          :disabled="disabled"
-          @click="emit('toggle-thinking')"
-          :title="thinkingEnabled ? t('chat.thinkingOn') : t('chat.thinkingOff')"
+          :class="{ active: thinkingEnabled && thinkingSupported, unsupported: !thinkingSupported }"
+          :disabled="disabled || !thinkingSupported"
+          @click="thinkingSupported && emit('toggle-thinking')"
+          :title="!thinkingSupported
+            ? t('chat.thinkingUnsupported')
+            : (thinkingEnabled ? t('chat.thinkingOn') : t('chat.thinkingOff'))"
         >
           <el-icon><MagicStick /></el-icon>
         </button>
@@ -239,6 +241,11 @@ interface Props {
   enableTalkMode?: boolean
   /** 深度思考开关状态 */
   thinkingEnabled?: boolean
+  /**
+   * RFC-049 PR-1-UI: 当前 runtime 模型是否支持 reasoning_effort。false 时按钮灰掉，
+   * 不响应点击，tooltip 提示当前模型不支持深度思考。默认 true 以保持向后兼容。
+   */
+  thinkingSupported?: boolean
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -257,6 +264,7 @@ const props = withDefaults(defineProps<Props>(), {
   queueSize: 0,
   enableTalkMode: false,
   thinkingEnabled: false,
+  thinkingSupported: true,
 })
 
 const emit = defineEmits<{
@@ -313,8 +321,15 @@ const handleSubmit = () => {
     }
   }
 
-  // 运行中且输入为空时，停止生成
+  // 运行中且输入为空时，停止生成 —— 但当用户刚刚追加了一条 queued 消息时，
+  // 第二次点击发送/按 Enter 通常是误操作（双击 / 输入法回车 / 连击）。这种情况下
+  // 触发 stop 会把用户预期会跑的当前 turn + queued 一起杀掉，前端给出"任务直接结束"
+  // 的错觉。检测到 sending 状态的 queued 消息时静默吞掉这次空提交，让用户必须明确
+  // 点 cancel-queued 或专用 stop 按钮才能终止。
   if (props.loading && !canSend.value) {
+    if (props.queuedMessage && (props.queuedMessage.status === 'queued' || props.queuedMessage.status === 'sending')) {
+      return
+    }
     emit('stop')
     return
   }
@@ -597,6 +612,11 @@ defineExpose({
   height: 4px;
   border-radius: 50%;
   background: var(--el-color-primary, #409eff);
+}
+/* RFC-049 PR-1-UI: model doesn't support reasoning_effort — stronger grayed state */
+.thinking-btn.unsupported {
+  opacity: 0.35;
+  cursor: not-allowed;
 }
 .thinking-btn:hover:not(:disabled) {
   color: var(--el-color-primary, #409eff);

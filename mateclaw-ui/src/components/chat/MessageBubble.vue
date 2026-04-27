@@ -1551,50 +1551,50 @@ watch(isGenerating, (generating) => {
   font-size: 0.92em;
 }
 
-.markdown-body :deep(.code-block) {
+/* Code-block CSS lives globally in main.css now (.markdown-body .code-block*)
+   so the rules apply consistently across MessageBubble, AgentContext, and
+   any future markdown-body context, and don't depend on Vue's per-component
+   scope hash. Keep this comment as a breadcrumb so future edits don't get
+   re-added here by reflex. */
+
+/* ===== Mermaid block ===== */
+.markdown-body :deep(.mermaid-block) {
   margin: 14px 0;
+  padding: 16px;
   border-radius: 12px;
-  overflow: hidden;
-  background: var(--mc-code-bg, #1e293b);
+  background: var(--mc-mermaid-bg, #f8fafc);
+  border: 1px solid var(--mc-mermaid-border, #e2e8f0);
+  text-align: center;
+  overflow-x: auto;
 }
-
-.markdown-body :deep(.code-block__header) {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 16px;
-  background: rgba(0, 0, 0, 0.2);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+.markdown-body :deep(.mermaid-block svg) {
+  max-width: 100%;
+  height: auto;
 }
-
-.markdown-body :deep(.code-block__lang) {
+.markdown-body :deep(.mermaid-block.mermaid-error) {
+  background: #fef2f2;
+  border-color: #fecaca;
+  color: #b91c1c;
+  text-align: left;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
-  color: #94a3b8;
-  font-weight: 500;
+  white-space: pre-wrap;
 }
 
-.markdown-body :deep(.code-block__copy) {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px 8px;
-  background: transparent;
-  border: none;
-  border-radius: 6px;
-  color: #94a3b8;
-  font-size: 12px;
-  cursor: pointer;
-  transition: all 0.15s ease;
+/* ===== KaTeX inline / block ===== */
+.markdown-body :deep(.katex-inline) {
+  font-size: 1em;
 }
-
-.markdown-body :deep(.code-block__copy:hover) {
-  background: rgba(255, 255, 255, 0.1);
-  color: #e2e8f0;
+.markdown-body :deep(.katex-block) {
+  display: block;
+  margin: 12px 0;
+  text-align: center;
+  overflow-x: auto;
 }
-
-.markdown-body :deep(.code-block pre) {
-  margin: 0;
-  border-radius: 0;
+.markdown-body :deep(.katex-error) {
+  color: #b91c1c;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.92em;
 }
 
 .markdown-body :deep(img) {

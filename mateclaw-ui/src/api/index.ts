@@ -144,7 +144,20 @@ export const conversationApi = {
 
 // ==================== Skill ====================
 export const skillApi = {
-  list: () => http.get('/skills'),
+  /** RFC-042 §2.1 — paginated skill listing with search/type/enabled/scanStatus filters */
+  page: (params: {
+    page?: number
+    size?: number
+    keyword?: string
+    skillType?: string
+    enabled?: boolean
+    /** 'PASSED' / 'FAILED' — filters by security_scan_status (RFC-042 §2.3.5) */
+    scanStatus?: string
+  } = {}) => http.get('/skills', { params }),
+  /** Tab count aggregate — returns { all, builtin, mcp, dynamic } */
+  counts: () => http.get('/skills/counts'),
+  /** RFC-042 §2.3.4 — manually rescan a single skill's security */
+  rescan: (id: string | number) => http.post(`/skills/${id}/rescan`),
   listEnabled: () => http.get('/skills/enabled'),
   get: (id: string | number) => http.get(`/skills/${id}`),
   create: (data: any) => http.post('/skills', data),
@@ -317,6 +330,14 @@ export const oauthApi = {
   revoke: () => http.delete('/oauth/openai/revoke'),
 }
 
+// RFC-062: Claude Code OAuth piggybacks on the user's local Claude Code
+// install — no in-app authorize/revoke flow yet (PR-4). Until then the UI
+// can only check status + force a re-detect from disk.
+export const claudeCodeOAuthApi = {
+  status: () => http.get('/oauth/anthropic/status'),
+  reload: () => http.post('/oauth/anthropic/reload'),
+}
+
 // ==================== Setup ====================
 export const setupApi = {
   onboardingStatus: () => http.get('/setup/onboarding-status'),
@@ -409,17 +430,25 @@ export const wikiApi = {
   listRaw: (kbId: number) => http.get(`/wiki/knowledge-bases/${kbId}/raw`),
   addRawText: (kbId: number, data: { title: string; content: string }) =>
     http.post(`/wiki/knowledge-bases/${kbId}/raw/text`, data),
-  uploadRaw: (kbId: number, formData: FormData) =>
+  uploadRaw: (kbId: number, formData: FormData, onProgress?: (pct: number) => void) =>
     http.post(`/wiki/knowledge-bases/${kbId}/raw/upload`, formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
+      onUploadProgress: onProgress
+        ? (e) => { if (e.total) onProgress(Math.round((e.loaded / e.total) * 100)) }
+        : undefined,
     }),
   deleteRaw: (kbId: number, rawId: number) =>
     http.delete(`/wiki/knowledge-bases/${kbId}/raw/${rawId}`),
   reprocessRaw: (kbId: number, rawId: number) =>
     http.post(`/wiki/knowledge-bases/${kbId}/raw/${rawId}/reprocess`),
+  downloadRaw: (kbId: number, rawId: number) =>
+    http.get<Blob>(`/wiki/knowledge-bases/${kbId}/raw/${rawId}/download`, {
+      responseType: 'blob',
+    }),
 
   // Wiki Pages
-  listPages: (kbId: number) => http.get(`/wiki/knowledge-bases/${kbId}/pages`),
+  listPages: (kbId: number, rawId?: number) =>
+    http.get(`/wiki/knowledge-bases/${kbId}/pages`, rawId != null ? { params: { rawId } } : undefined),
   getPage: (kbId: number, slug: string) =>
     http.get(`/wiki/knowledge-bases/${kbId}/pages/${encodeURIComponent(slug)}`),
   updatePage: (kbId: number, slug: string, content: string) =>
@@ -430,6 +459,14 @@ export const wikiApi = {
     http.delete(`/wiki/knowledge-bases/${kbId}/pages/batch`, { data: slugs }),
   getBacklinks: (kbId: number, slug: string) =>
     http.get(`/wiki/knowledge-bases/${kbId}/pages/${encodeURIComponent(slug)}/backlinks`),
+
+  // RFC-051 PR-7: archived pages
+  listArchivedPages: (kbId: number) =>
+    http.get(`/wiki/knowledge-bases/${kbId}/pages/archived`),
+  archivePage: (kbId: number, slug: string) =>
+    http.post(`/wiki/knowledge-bases/${kbId}/pages/${encodeURIComponent(slug)}/archive`),
+  unarchivePage: (kbId: number, slug: string) =>
+    http.post(`/wiki/knowledge-bases/${kbId}/pages/${encodeURIComponent(slug)}/unarchive`),
 
   // Processing
   processKB: (kbId: number) => http.post(`/wiki/knowledge-bases/${kbId}/process`),
