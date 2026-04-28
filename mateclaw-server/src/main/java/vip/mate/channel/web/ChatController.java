@@ -17,8 +17,10 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import vip.mate.common.result.R;
 import vip.mate.agent.AgentService;
 import vip.mate.agent.model.AgentEntity;
-import vip.mate.approval.ApprovalService;
+import vip.mate.approval.ApprovalWorkflowService;
+import vip.mate.approval.MetadataDecision;
 import vip.mate.approval.PendingApproval;
+import vip.mate.approval.ResolveOutcome;
 import vip.mate.memory.event.ConversationCompletionPublisher;
 import vip.mate.workspace.conversation.ConversationService;
 import vip.mate.workspace.conversation.model.MessageContentPart;
@@ -55,7 +57,7 @@ public class ChatController {
 
     private final AgentService agentService;
     private final ConversationService conversationService;
-    private final ApprovalService approvalService;
+    private final ApprovalWorkflowService approvalService;
     private final ChatStreamTracker streamTracker;
     private final ObjectMapper objectMapper;
     private final ConversationCompletionPublisher completionPublisher;
@@ -190,24 +192,20 @@ public class ChatController {
                 return emitter;
             }
 
-            // deny: 解决并清理 DB 残留
+            // deny: workflow.resolve handles DB + metadata + memory atomically.
             if (isDenyCommand) {
-                approvalService.resolve(pending.getPendingId(), username, "denied");
+                ResolveOutcome denyOutcome = approvalService.resolve(pending.getPendingId(), username, "denied");
                 conversationService.removeApprovalPlaceholders(conversationId);
-                // Sync the persisted message metadata so a subsequent page refresh
-                // doesn't re-hydrate a "pending_approval" ghost from message metadata
-                // that the in-memory map already moved past.
-                conversationService.markPendingApprovalsResolved(conversationId,
-                        java.util.Set.of(pending.getPendingId()), "denied");
-                log.info("[Approval-Stream] User {} denied pending {} for conversation {}",
-                        username, pending.getPendingId(), conversationId);
+                log.info("[Approval-Stream] User {} denied pending {} for conversation {} (dbSynced={}, msgRewritten={})",
+                        username, pending.getPendingId(), conversationId,
+                        denyOutcome.dbSynced(), denyOutcome.messagesRewritten());
             }
 
-            // approve: 原子 resolveAndConsume（消除 resolve/consume race condition）
+            // approve: atomic resolveAndConsume; workflow handles DB + metadata + memory.
             PendingApproval consumed = null;
             if (isApprovalCommand) {
-                consumed = approvalService.resolveAndConsume(pending.getPendingId(), username);
-                if (consumed == null) {
+                ResolveOutcome consumeOutcome = approvalService.resolveAndConsume(pending.getPendingId(), username);
+                if (consumeOutcome.isAlreadyResolved()) {
                     try {
                         sendEvent(emitter, "error", Map.of("message", "审批记录已过期或已被处理"));
                         sendEvent(emitter, "done", Map.of("status", "completed"));
@@ -215,15 +213,12 @@ public class ChatController {
                     emitter.complete();
                     return emitter;
                 }
-                // 清理 DB 中残留的审批占位消息（对齐 IM 渠道 replayApprovedToolCall）
+                consumed = consumeOutcome.consumedSnapshot();
+                // Clear residual approval placeholder messages so the LLM context for
+                // replay doesn't include "[Awaiting approval]" text artifacts.
                 conversationService.removeApprovalPlaceholders(conversationId);
-                // Same metadata sync as the deny branch — without this, refresh
-                // after approval still shows the spinner-state approval card
-                // because the persisted message says status='pending_approval'.
-                conversationService.markPendingApprovalsResolved(conversationId,
-                        java.util.Set.of(consumed.getPendingId()), "approved");
-                log.info("[Approval-Stream] User {} approved pending {} for conversation {}",
-                        username, consumed.getPendingId(), conversationId);
+                log.info("[Approval-Stream] User {} approved pending {} for conversation {} (msgRewritten={})",
+                        username, consumed.getPendingId(), conversationId, consumeOutcome.messagesRewritten());
             }
 
             final PendingApproval finalConsumed = consumed;
@@ -300,27 +295,38 @@ public class ChatController {
                             })
                             .doOnComplete(() -> {
                                 if (!finalized.compareAndSet(false, true)) return;
+                                // RFC-067 §4.6: replay can re-trigger an approval (the approved tool
+                                // call may chain into another guarded tool). Derive status the same
+                                // way as the normal stream so awaiting_approval doesn't get masked
+                                // as completed.
+                                boolean replayWasStopped = streamTracker.isStopRequested(conversationId);
+                                ChatStreamTracker.InterruptType replayInterrupt = streamTracker.getInterruptType(conversationId);
+                                boolean replayIsError = accumulator.getContent() != null
+                                        && accumulator.getContent().startsWith("[错误] ");
+                                String persistStatus = derivePersistStatus(
+                                        accumulator.isAwaitingApproval(), replayIsError,
+                                        replayWasStopped, replayInterrupt);
                                 try {
                                     MessageEntity savedAssistant = null;
                                     List<MessageContentPart> parts = accumulator.toAssistantParts();
                                     String text = accumulator.getContent();
                                     if (!text.isBlank() || !parts.isEmpty()) {
                                         savedAssistant = conversationService.saveMessage(conversationId, "assistant", text, parts,
-                                                "completed",
+                                                persistStatus,
                                                 accumulator.getPromptTokens(),
                                                 accumulator.getCompletionTokens(),
                                                 accumulator.getRuntimeModelName(),
                                                 accumulator.getRuntimeProviderId(),
-                                                accumulator.toMetadataJson());  // 包含 toolCalls 元数据
+                                                accumulator.toMetadataJson());  // includes toolCalls metadata
                                     }
                                     broadcastEvent(conversationId, "message_complete", Map.of(
-                                            "status", "completed",
+                                            "status", persistStatus,
                                             "hasThinking", !accumulator.getThinking().isBlank(),
                                             "hasContent", !text.isBlank()
                                     ));
                                     int msgCount = conversationService.getMessageCount(conversationId);
                                     broadcastEvent(conversationId, "done", buildDonePayload(
-                                            conversationId, "completed", savedAssistant, 0, 0, true, msgCount));
+                                            conversationId, persistStatus, savedAssistant, 0, 0, true, msgCount));
                                 } catch (Exception e) {
                                     log.warn("SSE replay complete error: {}", e.getMessage());
                                 } finally {
@@ -482,16 +488,8 @@ public class ChatController {
                             boolean isInterruptFollowup = interruptType == ChatStreamTracker.InterruptType.USER_INTERRUPT_WITH_FOLLOWUP;
                             boolean isError = accumulator.getContent() != null
                                     && accumulator.getContent().startsWith("[错误] ");
-                            String persistStatus;
-                            if (accumulator.isAwaitingApproval()) {
-                                persistStatus = "awaiting_approval";
-                            } else if (isError) {
-                                persistStatus = "error";
-                            } else if (!wasStopped) {
-                                persistStatus = "completed";
-                            } else {
-                                persistStatus = isInterruptFollowup ? "interrupted" : "stopped";
-                            }
+                            String persistStatus = derivePersistStatus(
+                                    accumulator.isAwaitingApproval(), isError, wasStopped, interruptType);
                             try {
                                 MessageEntity savedAssistant = null;
                                 List<MessageContentPart> assistantParts = accumulator.toAssistantParts();
@@ -790,23 +788,17 @@ public class ChatController {
         }
         boolean stopped = streamTracker.requestStop(conversationId);
 
-        // Sweep ghost approvals — see method-level Javadoc for rationale.
-        java.util.List<vip.mate.approval.PendingApproval> denied =
-                approvalService.denyAllByConversation(conversationId, username);
-        int messagesRewritten = 0;
-        if (!denied.isEmpty()) {
-            java.util.Set<String> ids = denied.stream()
-                    .map(vip.mate.approval.PendingApproval::getPendingId)
-                    .collect(java.util.stream.Collectors.toSet());
-            messagesRewritten = conversationService.markPendingApprovalsResolved(conversationId, ids, "denied");
-            for (vip.mate.approval.PendingApproval p : denied) {
-                broadcastEvent(conversationId, "tool_approval_resolved", Map.of(
-                        "pendingId", p.getPendingId(),
-                        "decision", "denied",
-                        "toolName", p.getToolName() != null ? p.getToolName() : "",
-                        "timestamp", System.currentTimeMillis()
-                ));
-            }
+        // Sweep ghost approvals — workflow.denyAllByConversation owns DB + metadata + memory
+        // atomically; we only need to broadcast SSE events on the resulting outcomes.
+        List<ResolveOutcome> denied = approvalService.denyAllByConversation(conversationId, username);
+        int messagesRewritten = denied.stream().mapToInt(ResolveOutcome::messagesRewritten).sum();
+        for (ResolveOutcome o : denied) {
+            broadcastEvent(conversationId, "tool_approval_resolved", Map.of(
+                    "pendingId", o.pendingId(),
+                    "decision", "denied",
+                    "toolName", o.toolName() != null ? o.toolName() : "",
+                    "timestamp", System.currentTimeMillis()
+            ));
         }
 
         log.info("Stop requested: conversationId={}, user={}, stopped={}, ghostPendingsCleared={}, messagesRewritten={}",
@@ -1080,13 +1072,24 @@ public class ChatController {
                 })
                 .doOnComplete(() -> {
                     if (!finalized.compareAndSet(false, true)) return;
+                    // RFC-067 §4.6: queued stream can hit a tool_approval_requested event
+                    // mid-flight. Derive status via the shared helper so awaiting_approval
+                    // is not silently downgraded to completed (which would prematurely fire
+                    // expirePendingApprovals on the frontend and ghost-clear the banner).
+                    boolean queuedWasStopped = streamTracker.isStopRequested(conversationId);
+                    ChatStreamTracker.InterruptType queuedInterrupt = streamTracker.getInterruptType(conversationId);
+                    boolean queuedIsError = accumulator.getContent() != null
+                            && accumulator.getContent().startsWith("[错误] ");
+                    String persistStatus = derivePersistStatus(
+                            accumulator.isAwaitingApproval(), queuedIsError,
+                            queuedWasStopped, queuedInterrupt);
                     try {
                         MessageEntity savedAssistant = null;
                         List<MessageContentPart> parts = accumulator.toAssistantParts();
                         String text = accumulator.getContent();
                         if (!text.isBlank() || !parts.isEmpty()) {
                             savedAssistant = conversationService.saveMessage(conversationId, "assistant", text, parts,
-                                    "completed",
+                                    persistStatus,
                                     accumulator.getPromptTokens(),
                                     accumulator.getCompletionTokens(),
                                     accumulator.getRuntimeModelName(),
@@ -1094,12 +1097,12 @@ public class ChatController {
                                     accumulator.toMetadataJson());
                         }
                         broadcastEvent(conversationId, "message_complete", Map.of(
-                                "status", "completed",
+                                "status", persistStatus,
                                 "hasThinking", !accumulator.getThinking().isBlank(),
                                 "hasContent", !text.isBlank()
                         ));
                         broadcastEvent(conversationId, "done", buildDonePayload(
-                                conversationId, "completed", savedAssistant,
+                                conversationId, persistStatus, savedAssistant,
                                 accumulator.getPromptTokens(), accumulator.getCompletionTokens(), true,
                                 conversationService.getMessageCount(conversationId)));
                     } catch (Exception e) {
@@ -1184,6 +1187,35 @@ public class ChatController {
         streamTracker.broadcast(conversationId, name, payload);
     }
 
+    /**
+     * Derive the persistence status for an assistant message at stream finalization
+     * (RFC-067 §4.6). Five-way state machine:
+     * <ul>
+     *   <li>{@code awaiting_approval} — accumulator hit a tool_approval_requested
+     *       event; the turn is paused, not finished. queued / replay paths must not
+     *       collapse this to {@code completed}.</li>
+     *   <li>{@code error} — content carries the typed-error prefix from the LLM
+     *       client. BaseAgent history sanitization skips these on the next prompt
+     *       so error text doesn't poison the conversation.</li>
+     *   <li>{@code completed} — clean finish, default case.</li>
+     *   <li>{@code interrupted} — user halted the running turn AND queued a
+     *       follow-up message (interrupt-with-followup).</li>
+     *   <li>{@code stopped} — user pressed Stop without follow-up.</li>
+     * </ul>
+     * Package-private so {@link vip.mate.channel.web.ChatControllerPersistStatusTest}
+     * can exercise the truth table directly without spinning up the controller.
+     */
+    static String derivePersistStatus(boolean isAwaitingApproval,
+                                      boolean isError,
+                                      boolean wasStopped,
+                                      ChatStreamTracker.InterruptType interruptType) {
+        if (isAwaitingApproval) return "awaiting_approval";
+        if (isError)            return "error";
+        if (!wasStopped)        return "completed";
+        return interruptType == ChatStreamTracker.InterruptType.USER_INTERRUPT_WITH_FOLLOWUP
+                ? "interrupted" : "stopped";
+    }
+
     private Map<String, Object> buildDonePayload(String conversationId, String status, MessageEntity savedAssistant,
                                                  int promptTokens, int completionTokens,
                                                  boolean persisted, Integer messageCount) {
@@ -1215,10 +1247,20 @@ public class ChatController {
      * Invoked from {@link ChatStreamTracker#onShutdown()} so any in-flight turn doesn't
      * lose its already-streamed content + tool calls when the process exits.
      * <p>
+     * Status routing (RFC-067 §4.6):
+     * <ul>
+     *   <li>If the accumulator was awaiting approval at shutdown, the message keeps
+     *       {@code awaiting_approval}. After restart, {@code recoverFromDb} re-registers
+     *       the pending in memory and the existing approval banner remains coherent
+     *       with both DB and metadata. Falling back to {@code interrupted_shutdown}
+     *       here would orphan the message metadata (UI would render "interrupted"
+     *       while the approval is still recoverable).</li>
+     *   <li>Otherwise {@code interrupted_shutdown} as before.</li>
+     * </ul>
      * Idempotent w.r.t. the normal doOnComplete/doOnError save: if those paths already
-     * persisted the message, this writes a second row with status="interrupted_shutdown",
-     * which is rare in practice (race window is sub-second between dispose and save) and
-     * acceptable. Skipping save when nothing to save avoids empty rows.
+     * persisted the message, this writes a second row, which is rare in practice
+     * (race window is sub-second between dispose and save) and acceptable. Skipping
+     * save when nothing to save avoids empty rows.
      */
     private void emergencySaveAccumulator(String conversationId, StreamAccumulator accumulator) {
         try {
@@ -1227,17 +1269,21 @@ public class ChatController {
             if (text.isBlank() && parts.isEmpty()) {
                 return;
             }
-            String savedText = text.isBlank() ? "[已中断 — 服务重启]" : text;
+            boolean awaitingApproval = accumulator.isAwaitingApproval();
+            String status = awaitingApproval ? "awaiting_approval" : "interrupted_shutdown";
+            String savedText = text.isBlank()
+                    ? (awaitingApproval ? "[等待审批 — 服务重启]" : "[已中断 — 服务重启]")
+                    : text;
             conversationService.saveMessage(conversationId, "assistant", savedText, parts,
-                    "interrupted_shutdown",
+                    status,
                     accumulator.getPromptTokens(),
                     accumulator.getCompletionTokens(),
                     accumulator.getRuntimeModelName(),
                     accumulator.getRuntimeProviderId(),
                     accumulator.toMetadataJson());
             log.info("[ChatController] Emergency-saved in-flight assistant message: " +
-                    "conversationId={}, textLen={}, partsCount={}",
-                    conversationId, text.length(), parts.size());
+                    "conversationId={}, status={}, textLen={}, partsCount={}",
+                    conversationId, status, text.length(), parts.size());
         } catch (Exception e) {
             log.error("[ChatController] Emergency save failed for {}: {}",
                     conversationId, e.getMessage(), e);

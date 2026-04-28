@@ -5,13 +5,40 @@
         <h2 class="section-title">{{ t('settings.model.title') }}</h2>
         <p class="section-desc">{{ t('settings.model.desc') }}</p>
       </div>
-      <button class="btn-primary" @click="openCreateProviderModal">
-        {{ t('settings.model.addProvider') }}
+      <div class="section-header__actions">
+        <!-- RFC-074 PR-2: primary entry to enable a built-in provider. -->
+        <button class="btn-primary" @click="openDrawer">
+          {{ t('settings.model.enableProviderCta') }}
+        </button>
+        <!-- Secondary: create a fully custom provider (your own base URL etc.). -->
+        <button class="btn-secondary" @click="openCreateProviderModal">
+          {{ t('settings.model.addCustomProvider') }}
+        </button>
+      </div>
+    </div>
+
+    <!-- RFC-074 PR-1: skeleton placeholder so the page paints something
+         immediately on first load instead of blank-then-pop. -->
+    <div v-if="loading" class="provider-group">
+      <el-skeleton :rows="4" animated />
+    </div>
+
+    <!-- RFC-074 PR-2: empty state shown when the user has no enabled providers.
+         The drawer auto-opens via onMounted, so this CTA is the recovery path
+         for users who closed it. -->
+    <div
+      v-if="!loading && !localProviders.length && !cloudProviders.length"
+      class="provider-empty"
+    >
+      <h3>{{ t('settings.model.emptyTitle') }}</h3>
+      <p>{{ t('settings.model.emptyDesc') }}</p>
+      <button class="btn-primary" @click="openDrawer">
+        {{ t('settings.model.enableProviderCta') }}
       </button>
     </div>
 
     <!-- 本地模型 -->
-    <div v-if="localProviders.length" class="provider-group">
+    <div v-if="!loading && localProviders.length" class="provider-group">
       <h3 class="group-title">
         <svg class="group-title__icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>
@@ -24,7 +51,6 @@
             :provider="provider"
             :connection-testing-id="connectionTestingId"
             :connection-results="connectionResults"
-            :pool-entry="providerPool[provider.id] || null"
             :reprobing="reprobingId === provider.id"
             :is-provider-active="isProviderActive"
             :provider-status="providerStatus"
@@ -34,6 +60,7 @@
             @provider-settings="openProviderConfigModal"
             @test-connection="handleTestConnection"
             @delete-provider="onDeleteProvider"
+            @disable-provider="onDisableProvider"
             @reprobe="reprobeProvider"
           />
         </div>
@@ -41,7 +68,7 @@
     </div>
 
     <!-- 云端模型 -->
-    <div v-if="cloudProviders.length" class="provider-group">
+    <div v-if="!loading && cloudProviders.length" class="provider-group">
       <h3 class="group-title">
         <svg class="group-title__icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/>
@@ -54,7 +81,6 @@
             :provider="provider"
             :connection-testing-id="connectionTestingId"
             :connection-results="connectionResults"
-            :pool-entry="providerPool[provider.id] || null"
             :reprobing="reprobingId === provider.id"
             :is-provider-active="isProviderActive"
             :provider-status="providerStatus"
@@ -64,6 +90,7 @@
             @provider-settings="openProviderConfigModal"
             @test-connection="handleTestConnection"
             @delete-provider="onDeleteProvider"
+            @disable-provider="onDisableProvider"
             @reprobe="reprobeProvider"
           />
         </div>
@@ -118,22 +145,44 @@
       @remove-model="onRemoveProviderModel"
       @add-model="onAddProviderModel"
     />
+
+    <!-- RFC-074 PR-2: Add Provider Drawer (catalog of opt-in built-ins). -->
+    <AddProviderDrawer
+      :visible="drawerOpen"
+      :catalog="catalog"
+      :toggling-id="togglingId"
+      :get-provider-icon="getProviderIcon"
+      :on-icon-error="onIconError"
+      :enable-provider="enableProvider"
+      @close="closeDrawer"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, defineAsyncComponent, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus'
+import { useRoute, useRouter } from 'vue-router'
 import type { ProviderInfo, ProviderModelInfo } from '@/types'
 import { useProviders } from './useProviders'
 import ProviderCard from './ProviderCard.vue'
 import EmbeddingModelsSection from './EmbeddingModelsSection.vue'
-import ProviderConfigModal from './modals/ProviderConfigModal.vue'
-import ManageModelsModal from './modals/ManageModelsModal.vue'
+// RFC-074 PR-1: defer modal JS until the user actually opens one — same
+// pattern as ChannelEditModal in commit 9300559b. Drops ~30KB from the
+// initial Settings/Models route chunk.
+const ProviderConfigModal = defineAsyncComponent(() => import('./modals/ProviderConfigModal.vue'))
+const ManageModelsModal = defineAsyncComponent(() => import('./modals/ManageModelsModal.vue'))
+// RFC-074 PR-2: drawer for browsing the catalog and opting into hidden built-ins.
+const AddProviderDrawer = defineAsyncComponent(() => import('./AddProviderDrawer.vue'))
 
 const { t } = useI18n()
 const savedTip = ref('')
+// Skeleton gate. Driven by onMounted only — fine because /settings/models is
+// NOT a keepAlive route. If anyone re-adds keepAlive in router/index.ts,
+// switch to onActivated (or reset loading there) so cached re-entries don't
+// skip the load + leave loading=false stale.
+const loading = ref(true)
 
 const {
   providers,
@@ -157,9 +206,7 @@ const {
   providerBaseUrlPlaceholder,
   providerBaseUrlHint,
   providerApiKeyPlaceholder,
-  providerPool,
   reprobingId,
-  loadProviderPool,
   reprobeProvider,
   loadProviders,
   loadActiveModel,
@@ -186,14 +233,51 @@ const {
   onIconError,
   handleOAuthLogin,
   handleOAuthRevoke,
+  // RFC-074 PR-2 — enablement / drawer
+  catalog,
+  drawerOpen,
+  togglingId,
+  openDrawer,
+  closeDrawer,
+  enableProvider,
+  disableProvider,
 } = useProviders()
 
 const localProviders = computed(() => providers.value.filter(p => p.isLocal))
 const cloudProviders = computed(() => providers.value.filter(p => !p.isLocal))
 
+const route = useRoute()
+const router = useRouter()
+/** sessionStorage guard so the drawer auto-opens at most once per session per workspace. */
+const AUTO_OPEN_KEY = 'rfc074-add-provider-auto-opened'
+
 onMounted(async () => {
-  await Promise.all([loadProviders(), loadActiveModel(), loadProviderPool()])
+  try {
+    await Promise.all([loadProviders(), loadActiveModel()])
+  } finally {
+    loading.value = false
+  }
+  // Deep-link: ?addProvider=1 forces the drawer open (used by ModelSelector empty link).
+  const forceOpen = route.query.addProvider === '1'
+  // Empty state auto-open: when the user has zero enabled providers, fling the
+  // drawer open immediately. Guard with sessionStorage so closing it once
+  // doesn't bring it back on the next route visit in the same session.
+  const noProviders = providers.value.length === 0
+  const alreadyAutoOpened = sessionStorage.getItem(AUTO_OPEN_KEY) === '1'
+  if (forceOpen || (noProviders && !alreadyAutoOpened)) {
+    sessionStorage.setItem(AUTO_OPEN_KEY, '1')
+    openDrawer()
+    if (forceOpen) {
+      // Strip the query so a manual close + back doesn't re-fire the open.
+      router.replace({ query: { ...route.query, addProvider: undefined } })
+    }
+  }
 })
+
+async function onDisableProvider(provider: ProviderInfo) {
+  if (!confirm(t('settings.model.disableConfirm', { name: provider.name }))) return
+  await disableProvider(provider.id)
+}
 
 async function onSaveProvider() {
   try {
@@ -292,6 +376,31 @@ function showSavedTip(message: string) {
 }
 .btn-primary { border: none; border-radius: 10px; padding: 9px 14px; font-size: 14px; cursor: pointer; transition: all 0.15s; background: var(--mc-primary); color: white; }
 .btn-primary:hover { background: var(--mc-primary-hover); }
+/* RFC-074 PR-2: section-header now has two CTAs (enable + create custom). */
+.section-header__actions { display: flex; gap: 8px; flex-shrink: 0; }
+.btn-secondary {
+  border: 1px solid var(--mc-border);
+  border-radius: 10px;
+  padding: 9px 14px;
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.15s;
+  background: var(--mc-bg-elevated);
+  color: var(--mc-text-primary);
+}
+.btn-secondary:hover { background: var(--mc-bg-sunken); }
+/* RFC-074 PR-2: empty state when no providers are enabled. */
+.provider-empty {
+  margin: 32px auto;
+  max-width: 480px;
+  padding: 36px 28px;
+  text-align: center;
+  border: 1px dashed var(--mc-border);
+  border-radius: 16px;
+  background: var(--mc-bg-elevated);
+}
+.provider-empty h3 { margin: 0 0 8px; font-size: 16px; color: var(--mc-text-primary); }
+.provider-empty p { margin: 0 0 18px; font-size: 13px; color: var(--mc-text-tertiary); }
 
 .save-tip { position: fixed; right: 24px; bottom: 24px; background: var(--mc-text-primary); color: var(--mc-text-inverse); padding: 10px 14px; border-radius: 10px; box-shadow: 0 10px 30px rgba(124, 63, 30, 0.22); }
 

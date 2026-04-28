@@ -8,8 +8,10 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import vip.mate.channel.ChannelAdapter;
 import vip.mate.channel.ChannelManager;
+import vip.mate.channel.dingtalk.DingTalkAppRegistrationService;
 import vip.mate.channel.dingtalk.DingTalkChannelAdapter;
 import vip.mate.channel.discord.DiscordChannelAdapter;
+import vip.mate.channel.feishu.FeishuAppRegistrationService;
 import vip.mate.channel.feishu.FeishuChannelAdapter;
 import vip.mate.channel.telegram.TelegramChannelAdapter;
 import vip.mate.channel.weixin.ILinkClient;
@@ -47,6 +49,8 @@ import java.util.Optional;
 public class ChannelWebhookController {
 
     private final ChannelManager channelManager;
+    private final FeishuAppRegistrationService feishuAppRegistrationService;
+    private final DingTalkAppRegistrationService dingTalkAppRegistrationService;
 
     @Operation(summary = "钉钉消息回调")
     @PostMapping("/dingtalk")
@@ -59,6 +63,57 @@ public class ChannelWebhookController {
         }
         log.warn("[webhook] DingTalk channel not active, ignoring callback");
         return ResponseEntity.ok(Map.of("status", "channel_not_active"));
+    }
+
+    // ==================== 钉钉一键应用注册（OAuth Device Flow） ====================
+
+    @Operation(summary = "启动钉钉扫码注册应用流程")
+    @PostMapping("/dingtalk/register/begin")
+    public ResponseEntity<Map<String, Object>> dingtalkRegisterBegin() {
+        try {
+            DingTalkAppRegistrationService.RegistrationSession session = dingTalkAppRegistrationService.begin();
+            return ResponseEntity.ok(Map.of("session_id", session.sessionId));
+        } catch (Exception e) {
+            log.error("[dingtalk-register] begin failed: {}", e.getMessage(), e);
+            return ResponseEntity.internalServerError()
+                    .body(Map.of("error", "Failed to start registration: " + e.getMessage()));
+        }
+    }
+
+    @Operation(summary = "查询钉钉扫码注册状态")
+    @GetMapping("/dingtalk/register/status")
+    public ResponseEntity<Map<String, Object>> dingtalkRegisterStatus(@RequestParam("session") String sessionId) {
+        DingTalkAppRegistrationService.RegistrationSession session = dingTalkAppRegistrationService.getSession(sessionId);
+        if (session == null) {
+            return ResponseEntity.ok(Map.of("status", "expired", "error", "session not found or expired"));
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("status", session.status.name().toLowerCase());
+        if (session.qrcodeUrl != null) {
+            body.put("qrcode_url", session.qrcodeUrl);
+            // Same as the feishu register flow: SDK gives us a verification URL string,
+            // browsers can't render that as an image, so encode into a PNG data URI here
+            // and cache it on the session so ZXing only runs once per registration attempt.
+            if (session.qrcodeImgDataUri == null) {
+                try {
+                    String base64 = generateQrCodeBase64(session.qrcodeUrl);
+                    session.qrcodeImgDataUri = "data:image/png;base64," + base64;
+                } catch (Exception e) {
+                    log.warn("[dingtalk-register] QR encode failed: {}", e.getMessage());
+                }
+            }
+            if (session.qrcodeImgDataUri != null) {
+                body.put("qrcode_img", session.qrcodeImgDataUri);
+            }
+        }
+        if (session.status == DingTalkAppRegistrationService.Status.CONFIRMED) {
+            body.put("client_id", session.clientId);
+            body.put("client_secret", session.clientSecret);
+        }
+        if (session.errorMessage != null) {
+            body.put("error", session.errorMessage);
+        }
+        return ResponseEntity.ok(body);
     }
 
     @Operation(summary = "飞书消息回调")
@@ -78,6 +133,62 @@ public class ChannelWebhookController {
         }
         log.warn("[webhook] Feishu channel not active, ignoring callback");
         return ResponseEntity.ok(Map.of("code", 0));
+    }
+
+    // ==================== 飞书一键应用注册（oapi-sdk 2.6+） ====================
+
+    @Operation(summary = "启动飞书扫码注册应用流程")
+    @PostMapping("/feishu/register/begin")
+    public ResponseEntity<Map<String, Object>> feishuRegisterBegin(
+            @RequestParam(value = "domain", defaultValue = "feishu") String domain) {
+        try {
+            String sessionId = feishuAppRegistrationService.begin(domain);
+            return ResponseEntity.ok(Map.of("session_id", sessionId));
+        } catch (Exception e) {
+            log.error("[feishu-register] begin failed: {}", e.getMessage(), e);
+            return ResponseEntity.internalServerError()
+                    .body(Map.of("error", "Failed to start registration: " + e.getMessage()));
+        }
+    }
+
+    @Operation(summary = "查询飞书扫码注册状态")
+    @GetMapping("/feishu/register/status")
+    public ResponseEntity<Map<String, Object>> feishuRegisterStatus(@RequestParam("session") String sessionId) {
+        FeishuAppRegistrationService.RegistrationSession session = feishuAppRegistrationService.getSession(sessionId);
+        if (session == null) {
+            return ResponseEntity.ok(Map.of("status", "expired", "error", "session not found or expired"));
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("status", session.status.name().toLowerCase());
+        if (session.qrcodeUrl != null) {
+            body.put("qrcode_url", session.qrcodeUrl);
+            body.put("qrcode_expire_seconds", session.qrcodeExpireSeconds);
+            // SDK gives us a verification URL string (verification_uri_complete);
+            // browsers can't render that as an image, so encode it into a PNG QR
+            // here just like the WeChat flow does. Cache the encoded image on the
+            // session so we only run ZXing once per registration attempt.
+            if (session.qrcodeImgDataUri == null) {
+                try {
+                    String base64 = generateQrCodeBase64(session.qrcodeUrl);
+                    session.qrcodeImgDataUri = "data:image/png;base64," + base64;
+                } catch (Exception e) {
+                    log.warn("[feishu-register] QR encode failed: {}", e.getMessage());
+                }
+            }
+            if (session.qrcodeImgDataUri != null) {
+                body.put("qrcode_img", session.qrcodeImgDataUri);
+            }
+        }
+        if (session.status == FeishuAppRegistrationService.Status.CONFIRMED) {
+            body.put("client_id", session.clientId);
+            body.put("client_secret", session.clientSecret);
+            if (session.userOpenId != null) body.put("user_open_id", session.userOpenId);
+            if (session.userTenantBrand != null) body.put("user_tenant_brand", session.userTenantBrand);
+        }
+        if (session.errorMessage != null) {
+            body.put("error", session.errorMessage);
+        }
+        return ResponseEntity.ok(body);
     }
 
     @Operation(summary = "Telegram 消息回调")

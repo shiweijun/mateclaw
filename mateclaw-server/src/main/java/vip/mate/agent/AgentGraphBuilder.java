@@ -15,6 +15,8 @@ import lombok.extern.slf4j.Slf4j;
 // PR-0b: Anthropic imports moved with the construction code into AgentAnthropicChatModelBuilder.
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.ai.model.ApiKey;
+import org.springframework.ai.model.NoopApiKey;
 import org.springframework.ai.model.SimpleApiKey;
 import org.springframework.ai.openai.OpenAiChatModel;
 import org.springframework.ai.openai.OpenAiChatOptions;
@@ -1006,7 +1008,13 @@ public class AgentGraphBuilder {
             throw new MateClawException("err.agent.provider_not_configured", "Provider 未完成配置，请在模型设置中填写有效的 API Key 和 Base URL");
         }
         String apiKey = provider.getApiKey();
-        if (!modelProviderService.hasUsableApiKey(apiKey)) {
+        // Honor the provider's requireApiKey flag instead of hard-failing on every empty key.
+        // Local + key-free providers (Ollama, LM Studio, MLX, llama.cpp, OpenCode) declare
+        // requireApiKey=false; for them an empty / placeholder key means "no Authorization
+        // header" — Spring AI's NoopApiKey expresses that. Without this the chat path
+        // rejected providers that probe / discovery / connection-test all considered usable.
+        boolean keyRequired = !Boolean.FALSE.equals(provider.getRequireApiKey());
+        if (keyRequired && !modelProviderService.hasUsableApiKey(apiKey)) {
             throw new MateClawException("err.agent.provider_apikey_invalid", "Provider API Key 未配置或无效: " + provider.getProviderId());
         }
         String baseUrl = normalizeOpenAiBaseUrl(provider.getBaseUrl());
@@ -1042,9 +1050,12 @@ public class AgentGraphBuilder {
         boolean kimiSearchEnabled = isKimiProvider(provider)
                 && Boolean.TRUE.equals(kwargs.get("enableSearch"));
 
+        ApiKey apiKeyImpl = (keyRequired && StringUtils.hasText(apiKey))
+                ? new SimpleApiKey(apiKey.trim())
+                : new NoopApiKey();
         return new OpenAiApi(
                 baseUrl,
-                new SimpleApiKey(apiKey.trim()),
+                apiKeyImpl,
                 headers,
                 completionsPath,
                 "/v1/embeddings",
@@ -1058,6 +1069,7 @@ public class AgentGraphBuilder {
                 chatRequest = sanitizeReasoningEffortForProvider(chatRequest, provider);
                 chatRequest = patchReasoningContent(chatRequest, provider);
                 chatRequest = stripReasoningEffortIfIncompatible(chatRequest);
+                chatRequest = stripAutoToolChoice(chatRequest);
                 chatRequest = patchVideoMediaContent(chatRequest);
                 if (kimiSearchEnabled) {
                     chatRequest = injectKimiWebSearch(chatRequest);
@@ -1078,6 +1090,7 @@ public class AgentGraphBuilder {
                 chatRequest = sanitizeReasoningEffortForProvider(chatRequest, provider);
                 chatRequest = patchReasoningContent(chatRequest, provider);
                 chatRequest = stripReasoningEffortIfIncompatible(chatRequest);
+                chatRequest = stripAutoToolChoice(chatRequest);
                 chatRequest = patchVideoMediaContent(chatRequest);
                 if (kimiSearchEnabled) {
                     chatRequest = injectKimiWebSearch(chatRequest);
@@ -1855,6 +1868,65 @@ public class AgentGraphBuilder {
     private static boolean requiresReasoningContentPatch(String modelName) {
         ModelFamily family = ModelFamily.detect(modelName);
         return family.isThinking();
+    }
+
+    /**
+     * Strip {@code tool_choice="auto"} from outbound chat-completion requests.
+     *
+     * <p>Per the OpenAI spec, omitting {@code tool_choice} when {@code tools} is non-empty
+     * is functionally equivalent to {@code "auto"} (the server defaults to auto-pick).
+     * Stripping the explicit literal {@code "auto"}:
+     * <ul>
+     *   <li>does not change behavior on compliant servers (e.g. OpenAI, DashScope) — they
+     *       still default to auto when tools are present</li>
+     *   <li>unblocks strict OpenAI-compatible self-hosted serving frameworks that reject
+     *       {@code tool_choice="auto"} at request validation time unless launched with an
+     *       auto-tool-choice opt-in flag, which is a common reason custom endpoints
+     *       respond with a generic 400 / "body=None" Pydantic error</li>
+     * </ul>
+     *
+     * <p>Explicit values other than {@code "auto"} ({@code "none"}, {@code "required"},
+     * or a specific function descriptor) are passed through unchanged.
+     */
+    private static OpenAiApi.ChatCompletionRequest stripAutoToolChoice(OpenAiApi.ChatCompletionRequest request) {
+        Object tc = request.toolChoice();
+        if (tc == null || !"auto".equals(String.valueOf(tc))) {
+            return request;
+        }
+        return new OpenAiApi.ChatCompletionRequest(
+                request.messages(),
+                request.model(),
+                request.store(),
+                request.metadata(),
+                request.frequencyPenalty(),
+                request.logitBias(),
+                request.logprobs(),
+                request.topLogprobs(),
+                request.maxTokens(),
+                request.maxCompletionTokens(),
+                request.n(),
+                request.outputModalities(),
+                request.audioParameters(),
+                request.presencePenalty(),
+                request.responseFormat(),
+                request.seed(),
+                request.serviceTier(),
+                request.stop(),
+                request.stream(),
+                request.streamOptions(),
+                request.temperature(),
+                request.topP(),
+                request.tools(),
+                null,  // toolChoice — strip "auto" so strict OpenAI-compatible servers accept the request
+                request.parallelToolCalls(),
+                request.user(),
+                request.reasoningEffort(),
+                request.webSearchOptions(),
+                request.verbosity(),
+                request.promptCacheKey(),
+                request.safetyIdentifier(),
+                request.extraBody()
+        );
     }
 
     /**

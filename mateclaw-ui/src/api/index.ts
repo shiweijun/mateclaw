@@ -30,7 +30,9 @@ http.interceptors.response.use(
     // 后端统一响应格式 R<T>: { code: number, msg: string, data: T }
     if (data && typeof data === 'object' && 'code' in data) {
       if (data.code === 200) return data
-      if (data.code === 401 || data.code === 403) {
+      // 401 = authentication failure → log out
+      // 403 = authorization failure (e.g. workspace permission denied) → keep session, surface error to caller
+      if (data.code === 401) {
         handleAuthFailure()
         return Promise.reject(new Error(data.msg || 'Unauthorized'))
       }
@@ -39,7 +41,7 @@ http.interceptors.response.use(
     return data
   },
   (err) => {
-    if (err.response?.status === 401 || err.response?.status === 403) {
+    if (err.response?.status === 401) {
       handleAuthFailure()
     }
     return Promise.reject(err.response?.data?.msg || err.message)
@@ -121,8 +123,6 @@ export const chatApi = {
   },
   stop: (conversationId: string) =>
     http.post<{ stopped: boolean }>(`/chat/${conversationId}/stop`),
-  approve: (conversationId: string, data: { pendingId: string; decision: string }) =>
-    http.post(`/chat/${conversationId}/approve`, data),
   getPendingApprovals: (conversationId: string) =>
     http.get(`/chat/${conversationId}/pending-approvals`),
 }
@@ -232,6 +232,16 @@ export const channelApi = {
   weixinQrcode: () => http.get('/channels/webhook/weixin/qrcode'),
   weixinQrcodeStatus: (qrcode: string) =>
     http.get(`/channels/webhook/weixin/qrcode/status?qrcode=${encodeURIComponent(qrcode)}`),
+  // Feishu one-click app registration (oapi-sdk 2.6+ scene/registration)
+  feishuRegisterBegin: (domain: string) =>
+    http.post(`/channels/webhook/feishu/register/begin?domain=${encodeURIComponent(domain)}`),
+  feishuRegisterStatus: (sessionId: string) =>
+    http.get(`/channels/webhook/feishu/register/status?session=${encodeURIComponent(sessionId)}`),
+  // DingTalk one-click app registration (OAuth Device Flow)
+  dingtalkRegisterBegin: () =>
+    http.post('/channels/webhook/dingtalk/register/begin'),
+  dingtalkRegisterStatus: (sessionId: string) =>
+    http.get(`/channels/webhook/dingtalk/register/status?session=${encodeURIComponent(sessionId)}`),
 }
 
 // ==================== MCP Server ====================
@@ -284,6 +294,14 @@ export const modelApi = {
     http.post(`/models/${providerId}/test-connection`),
   testModel: (providerId: string, modelId: string) =>
     http.post(`/models/${providerId}/models/${encodeURIComponent(modelId)}/test`),
+
+  // ==================== RFC-074: enabled / catalog ====================
+  /** Full provider catalog including enabled=false rows; powers the Add Provider drawer. */
+  catalog: () => http.get('/models/catalog'),
+  /** Opt a provider into the dropdown; backend triggers re-probe via ModelConfigChangedEvent. */
+  enableProvider: (providerId: string) => http.post(`/models/${providerId}/enable`),
+  /** Hide a provider; if it owned the current default model, backend auto-promotes a replacement. */
+  disableProvider: (providerId: string) => http.post(`/models/${providerId}/disable`),
 
   // ==================== Embedding Model (RFC Embedding UI) ====================
   listByType: (modelType: 'chat' | 'embedding') =>

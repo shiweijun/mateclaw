@@ -565,6 +565,11 @@ const { startObserving: startECharts, dispose: disposeECharts } = useEChartsRend
 const { startObserving: startKatex, dispose: disposeKatex } = useKatexRenderer(echartsContainerRef)
 const { startObserving: startMermaid, dispose: disposeMermaid } = useMermaidRenderer(echartsContainerRef)
 
+// Last-attempt draft, restored into the input box when the SSE error event
+// arrives async (sendChatMessage resolves on connect, the error fires later,
+// so the catch in handleSendMessage cannot recover input by itself).
+const pendingSendDraft = ref<{ input: string; attachments: any[] } | null>(null)
+
 // 使用 useChat composable
 const {
   messages,
@@ -584,11 +589,29 @@ const {
   baseUrl: '',
   thinkingLevel,
   onStreamEnd: async (meta) => {
+    // Restore the input/attachments if the turn ended in an error and the
+    // user hasn't typed something else in the meantime.
+    if (meta.reason === 'error' && pendingSendDraft.value) {
+      const draft = pendingSendDraft.value
+      if (!inputText.value) inputText.value = draft.input
+      if (pendingAttachments.value.length === 0) pendingAttachments.value = draft.attachments
+    }
+    if (meta.reason !== 'error') {
+      pendingSendDraft.value = null
+    }
     // 流结束后刷新会话列表（更新 lastActiveTime / 标题等）
     await loadConversations()
     if (meta.conversationId && meta.conversationId === currentConversationId.value) {
-      // 审批挂起或中断续跑时不从 DB 刷新消息，避免覆盖本地状态或破坏消息顺序
-      if (meta.reason !== 'awaiting_approval' && meta.reason !== 'interrupted') {
+      // Skip DB refresh for awaiting_approval / interrupted / error:
+      //  - awaiting_approval / interrupted: avoids overwriting local-only state
+      //    or breaking message ordering.
+      //  - error: the failed turn (e.g. SSE setup failure like "无权操作该会话")
+      //    was never persisted, so refreshing would wipe the user's just-sent
+      //    bubble and the failed assistant placeholder, leaving no trace of
+      //    the attempt in the chat window.
+      if (meta.reason !== 'awaiting_approval'
+          && meta.reason !== 'interrupted'
+          && meta.reason !== 'error') {
         await refreshCurrentConversationMessages(meta.conversationId)
       }
     }
@@ -736,6 +759,22 @@ function handleKeyboardShortcuts(e: KeyboardEvent) {
 let activityPollTimer: number | null = null
 const ACTIVITY_POLL_MS = 4000
 
+/**
+ * 判断当前消息列表的末尾是不是一条"本地仅有的失败气泡"。
+ * 典型场景：SSE setup 阶段就抛错（如"无权操作该会话"），
+ * 这次 turn 的 user / assistant 消息从未持久化进 DB。
+ * 数据库快照不知道它们存在，pollActivity 的对齐会把它们冲掉。
+ *
+ * 识别条件：末尾 assistant 状态为 failed、带 errorInfo、且 id 不是 DB 数值 id（client uuid）。
+ */
+function hasLocalOnlyFailedTail(): boolean {
+  const last = messages.value[messages.value.length - 1] as any
+  if (!last || last.role !== 'assistant') return false
+  if (last.status !== 'failed') return false
+  if (!last.errorInfo) return false
+  return !/^\d+$/.test(String(last.id))
+}
+
 async function pollActivity() {
   // 页面不可见时不轮询，避免切到别的标签还在空耗
   if (typeof document !== 'undefined' && document.hidden) return
@@ -759,8 +798,11 @@ async function pollActivity() {
         await refreshCurrentConversationMessages(cid)
         if (currentConversationId.value !== cid || isGenerating.value) return
         await reconnectStream(cid)
-      } else {
-        // 不在跑：从 DB 对齐消息（新 user 消息 / 刚落库 assistant 会合并进来）
+      } else if (!hasLocalOnlyFailedTail()) {
+        // 不在跑：从 DB 对齐消息（新 user 消息 / 刚落库 assistant 会合并进来）。
+        // 但若末尾是本地失败气泡（SSE setup 失败一类，后端从未持久化过），
+        // 就跳过对齐 —— 不然这次的 user/失败 assistant 会被 DB 快照覆盖掉，
+        // 用户除了上面的 toast 看不到任何痕迹。
         await refreshCurrentConversationMessages(cid)
       }
     } catch {
@@ -953,30 +995,83 @@ async function selectConversation(conv: Conversation) {
       messages.value = extractMessages(res).messages.map((msg: Message) => normalizeMessage(msg))
     }
 
-    // Hydrate pending approvals：恢复刷新后丢失的审批卡片
+    // Hydrate pending approvals：恢复刷新后丢失的审批卡片（RFC-067 §4.9）
+    //
+    // Two-way reconciliation between the server's pending list and each
+    // message's metadata.pendingApproval:
+    //   1. Forward — server pending → align onto the message that already
+    //      carries the same pendingId (so multi-pending convs don't have
+    //      every banner overwrite the same row); fallback to last assistant
+    //      only when no message has that id yet.
+    //   2. Reverse — local message metadata still says pending_approval but
+    //      the server no longer lists that pendingId → flip to 'expired'
+    //      locally. This closes the GC/timeout loop without requiring an
+    //      extra server-side broadcast: the next refresh sees a clean state.
     try {
       const approvalRes: any = await chatApi.getPendingApprovals(requestedConvId)
       if (currentConversationId.value !== requestedConvId) return
-      const pendingApprovals = approvalRes.data || []
-      if (pendingApprovals.length > 0) {
-        const assistantMessages = messages.value.filter(m => m.role === 'assistant')
-        const lastAssistant = assistantMessages[assistantMessages.length - 1]
-        if (lastAssistant) {
-          for (const pa of pendingApprovals) {
-            (lastAssistant as any).metadata = {
+      const pendingApprovals: any[] = approvalRes.data || []
+
+      // Index existing messages by their embedded pendingId (assistant only).
+      const indexById = new Map<string, Message>()
+      for (const m of messages.value) {
+        if (m.role !== 'assistant') continue
+        const pid = (m as any).metadata?.pendingApproval?.pendingId
+        if (typeof pid === 'string' && pid) indexById.set(pid, m)
+      }
+
+      // Forward direction: align server-known pending onto its owning message.
+      for (const pa of pendingApprovals) {
+        const enriched = {
+          pendingId: pa.pendingId,
+          toolName: pa.toolName,
+          arguments: pa.toolArguments,
+          reason: pa.reason,
+          status: 'pending_approval' as const,
+          findings: pa.findingsJson ? JSON.parse(pa.findingsJson) : undefined,
+          maxSeverity: pa.maxSeverity || undefined,
+          summary: pa.summary || undefined,
+        }
+        const target = indexById.get(pa.pendingId)
+        if (target) {
+          (target as any).metadata = {
+            ...(target as any).metadata,
+            currentPhase: 'awaiting_approval',
+            pendingApproval: enriched,
+          }
+        } else {
+          // Fallback: no message in the loaded history claims this pendingId
+          // (typical when the assistant message hasn't been persisted yet —
+          // e.g., approval fired before doOnComplete). Append to the last
+          // assistant; same as pre-RFC behavior, but logged so a regression
+          // where multiple unmatched pendings collide is observable.
+          const assistantMessages = messages.value.filter(m => m.role === 'assistant')
+          const lastAssistant = assistantMessages[assistantMessages.length - 1]
+          if (lastAssistant) {
+            console.warn('[hydrate] pendingId %s has no owning message — falling back to last assistant', pa.pendingId)
+            ;(lastAssistant as any).metadata = {
               ...(lastAssistant as any).metadata,
               currentPhase: 'awaiting_approval',
-              pendingApproval: {
-                pendingId: pa.pendingId,
-                toolName: pa.toolName,
-                arguments: pa.toolArguments,
-                reason: pa.reason,
-                status: 'pending_approval',
-                findings: pa.findingsJson ? JSON.parse(pa.findingsJson) : undefined,
-                maxSeverity: pa.maxSeverity || undefined,
-                summary: pa.summary || undefined,
-              }
+              pendingApproval: enriched,
             }
+          }
+        }
+      }
+
+      // Reverse direction: any local pending_approval whose pendingId is not
+      // in the server's list got resolved (timeout / consume) without a UI
+      // event — flip to expired so MessageBubble hides the banner.
+      const serverIds = new Set<string>(pendingApprovals.map((p: any) => p.pendingId))
+      for (const m of messages.value) {
+        if (m.role !== 'assistant') continue
+        const meta = (m as any).metadata
+        const local = meta?.pendingApproval
+        if (local?.status === 'pending_approval'
+            && local.pendingId
+            && !serverIds.has(local.pendingId)) {
+          (m as any).metadata = {
+            ...meta,
+            pendingApproval: { ...local, status: 'expired' },
           }
         }
       }
@@ -1161,6 +1256,8 @@ async function handleSendMessage(content: string) {
   // 先暂存，发送成功后再清空（失败时恢复）
   const savedInput = inputText.value
   const savedAttachments = [...pendingAttachments.value]
+  // Stash for async-error recovery in onStreamEnd (sync catch can't reach this).
+  pendingSendDraft.value = { input: savedInput, attachments: savedAttachments }
   inputText.value = ''
   chatInputRef.value?.clear?.()
   pendingAttachments.value = []
