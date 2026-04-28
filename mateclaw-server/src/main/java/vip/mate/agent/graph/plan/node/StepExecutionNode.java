@@ -55,7 +55,7 @@ public class StepExecutionNode implements NodeAction {
     private final String reasoningEffort;
     private final NodeStreamingChatHelper streamingHelper;
 
-    private static final int MAX_TOOL_CALLS_PER_STEP = 5;
+    private static final int MAX_TOOL_CALLS_PER_STEP = 50;
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     public StepExecutionNode(ChatModel chatModel, AgentToolSet toolSet,
