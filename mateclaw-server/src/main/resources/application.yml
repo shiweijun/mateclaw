@@ -45,7 +45,7 @@ spring:
   # SQL 初始化由 DatabaseBootstrapRunner 接管，关闭 Spring 自动执行
   sql:
     init:
-      mode: never
+      mode: always
 
   # Flyway 数据库版本迁移
   flyway:
