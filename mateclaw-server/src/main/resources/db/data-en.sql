@@ -112,7 +112,11 @@ VALUES ('zhipu-intl', 'Zhipu AI (International)', '', 'OpenAIChatModel', '', 'ht
 
 MERGE INTO mate_model_provider (provider_id, name, api_key_prefix, chat_model, api_key, base_url, generate_kwargs, is_custom, is_local, support_model_discovery, support_connection_check, freeze_url, require_api_key, create_time, update_time)
 KEY (provider_id)
-VALUES ('volcengine', 'Volcano Engine', '', 'OpenAIChatModel', '', 'https://ark.cn-beijing.volces.com/api/v3', '{}', FALSE, FALSE, FALSE, TRUE, TRUE, TRUE, NOW(), NOW());
+VALUES ('volcengine', 'Volcano Engine', '', 'OpenAIChatModel', '', 'https://ark.cn-beijing.volces.com/api/v3', '{}', FALSE, FALSE, TRUE, TRUE, TRUE, TRUE, NOW(), NOW());
+
+MERGE INTO mate_model_provider (provider_id, name, api_key_prefix, chat_model, api_key, base_url, generate_kwargs, is_custom, is_local, support_model_discovery, support_connection_check, freeze_url, require_api_key, create_time, update_time)
+KEY (provider_id)
+VALUES ('volcengine-plan', 'Volcano Engine Coding Plan', '', 'OpenAIChatModel', '', 'https://ark.cn-beijing.volces.com/api/coding/v3', '{}', FALSE, FALSE, TRUE, TRUE, TRUE, TRUE, NOW(), NOW());
 
 MERGE INTO mate_model_provider (provider_id, name, api_key_prefix, chat_model, api_key, base_url, generate_kwargs, is_custom, is_local, support_model_discovery, support_connection_check, freeze_url, require_api_key, auth_type, create_time, update_time)
 KEY (provider_id)
@@ -167,9 +171,13 @@ MERGE INTO mate_model_config (id, name, provider, model_name, description, tempe
 (1000000101, 'Qwen3 Max', 'dashscope', 'qwen3-max', '', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
 (1000000102, 'Qwen3 235B A22B Thinking', 'dashscope', 'qwen3-235b-a22b-thinking-2507', '', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
 (1000000103, 'DeepSeek-V3.2', 'dashscope', 'deepseek-v3.2', '', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
--- Removed: qwen3.5-plus / qwen3.5-max — unavailable on DashScope native protocol (returns 400 InvalidParameter)
-(1000000172, 'Qwen3 Plus', 'dashscope', 'qwen3-plus', 'Qwen3 balanced model', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
+-- Note: dotted Qwen3 versions (qwen3-plus / qwen3.5-plus / qwen3.5-max / qwen3.6-*) only ship on the
+-- OpenAI-compatible endpoint. Calling them through DashScope native (text-generation/generation)
+-- returns 400 InvalidParameter — use the bailian-team OpenAI-compat provider instead.
 (1000000173, 'Qwen Long', 'dashscope', 'qwen-long', 'Long-context model with extended context support', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
+(1000000174, 'Qwen Plus (latest)',  'dashscope', 'qwen-plus-latest',  'Latest stable snapshot of Qwen Plus — auto-updates as Bailian rolls new releases', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
+(1000000175, 'Qwen Max (latest)',   'dashscope', 'qwen-max-latest',   'Latest stable snapshot of Qwen Max — strongest reasoning capability',              0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
+(1000000176, 'Qwen Turbo (latest)', 'dashscope', 'qwen-turbo-latest', 'Latest stable snapshot of Qwen Turbo — low latency, high frequency',               0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
 (1000000104, 'Qwen3.5-122B-A10B', 'modelscope', 'Qwen/Qwen3.5-122B-A10B', '', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
 (1000000105, 'GLM-5', 'modelscope', 'ZhipuAI/GLM-5', '', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
 (1000000106, 'Qwen3.5 Plus', 'aliyun-codingplan', 'qwen3.5-plus', '', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
@@ -248,12 +256,17 @@ MERGE INTO mate_model_config (id, name, provider, model_name, description, tempe
 (1000000221, 'GLM-5V-Turbo', 'zhipu-intl', 'glm-5v-turbo', 'Multimodal vision model (International, recommended)', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
 (1000000222, 'GLM-5', 'zhipu-intl', 'glm-5', 'Flagship model (International)', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
 (1000000223, 'GLM-5.1', 'zhipu-intl', 'glm-5.1', 'Latest flagship model (International)', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
-(1000000230, 'Doubao 1.5 Pro 256K', 'volcengine', 'doubao-1.5-pro-256k', 'Doubao flagship model with 256K context', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
-(1000000231, 'Doubao 1.5 Pro 32K', 'volcengine', 'doubao-1.5-pro-32k', 'Doubao flagship model with 32K context', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
-(1000000232, 'Doubao 1.5 Lite 32K', 'volcengine', 'doubao-1.5-lite-32k', 'Doubao lite model, cost-effective', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
-(1000000233, 'Doubao 1.5 Vision Pro 32K', 'volcengine', 'doubao-1.5-vision-pro-32k', 'Doubao multimodal vision model', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
-(1000000234, 'Doubao 1.5 Thinking Pro', 'volcengine', 'doubao-1.5-thinking-pro', 'Doubao deep reasoning model', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
-(1000000235, 'Doubao 1.5 Thinking Lite', 'volcengine', 'doubao-1.5-thinking-lite', 'Doubao lite reasoning model', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
+(1000000310, 'Doubao Seed 1.8', 'volcengine', 'doubao-seed-1-8-251228', 'Doubao flagship multimodal model, text + image, 256K context', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
+(1000000311, 'Doubao Seed Code Preview', 'volcengine', 'doubao-seed-code-preview-251028', 'Doubao code preview model, text + image, 256K context', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
+(1000000312, 'Kimi K2.5', 'volcengine', 'kimi-k2-5-260127', 'Kimi K2.5 (hosted on Volcano Ark), text + image, 256K context', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
+(1000000313, 'GLM 4.7', 'volcengine', 'glm-4-7-251222', 'GLM 4.7 (hosted on Volcano Ark), text + image, 200K context', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
+(1000000314, 'DeepSeek V3.2', 'volcengine', 'deepseek-v3-2-251201', 'DeepSeek V3.2 (hosted on Volcano Ark), text + image, 128K context', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
+(1000000320, 'Ark Coding Plan', 'volcengine-plan', 'ark-code-latest', 'Ark Coding Plan flagship model, 256K context', 0.2, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
+(1000000321, 'Doubao Seed Code', 'volcengine-plan', 'doubao-seed-code', 'Doubao code model, 256K context', 0.2, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
+(1000000322, 'Doubao Seed Code Preview', 'volcengine-plan', 'doubao-seed-code-preview-251028', 'Doubao code preview model, 256K context', 0.2, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
+(1000000323, 'GLM 4.7 Coding', 'volcengine-plan', 'glm-4.7', 'GLM 4.7 coding edition (hosted on Volcano Ark), 200K context', 0.2, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
+(1000000324, 'Kimi K2 Thinking', 'volcengine-plan', 'kimi-k2-thinking', 'Kimi K2 Thinking (hosted on Volcano Ark), 256K context', 0.2, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
+(1000000325, 'Kimi K2.5 Coding', 'volcengine-plan', 'kimi-k2.5', 'Kimi K2.5 coding edition (hosted on Volcano Ark), 256K context', 0.2, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
 (1000000240, 'Kimi for Coding', 'kimi-code', 'kimi-for-coding', 'Kimi Code dedicated coding model', 0.2, 32768, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
 (1000000250, 'GPT-5.4', 'openai-chatgpt', 'gpt-5.4', 'ChatGPT Plus/Pro member model (OAuth login)', NULL, 128000, NULL, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
 (1000000251, 'GPT-5.4 Mini', 'openai-chatgpt', 'gpt-5.4-mini', 'ChatGPT member lightweight model', NULL, 128000, NULL, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
@@ -1195,162 +1208,17 @@ Automatically activate when user message contains:
 Use read_skill_file to access references/ for more background material.' WHERE id = 1000000015;
 
 -- ==================== Channel Seed Data ====================
--- MateClaw supports multiple channels
+-- Only the Web channel is seeded — it's always-on and needs no
+-- credentials. Other channel types are added through the wizard
+-- (ChannelTypePicker → ChannelOnboardingWizard) so the list page
+-- doesn't start with 8 empty placeholders staring at the user.
+-- See V64__cleanup_unused_channel_seeds.sql for the matching cleanup
+-- of those placeholders on existing installs.
 
--- 1. Web Console (enabled by default)
 MERGE INTO mate_channel (id, name, channel_type, agent_id, bot_prefix, config_json, enabled, description, create_time, update_time, deleted)
 KEY (id)
 VALUES (1000000001, 'Web Console', 'web', 1000000001, '', '{}', TRUE,
         'Default Web console channel with browser SSE streaming', NOW(), NOW(), 0);
-
--- 2. DingTalk (disabled by default, requires client_id/client_secret)
-MERGE INTO mate_channel (id, name, channel_type, agent_id, bot_prefix, config_json, enabled, description, create_time, update_time, deleted)
-KEY (id)
-VALUES (1000000002, 'DingTalk Bot', 'dingtalk', 1000000001, '', '{
-  "client_id": "",
-  "client_secret": "",
-  "robot_code": "",
-  "message_type": "markdown",
-  "card_template_id": "",
-  "dm_policy": "open",
-  "group_policy": "open",
-  "allow_from": [],
-  "deny_message": "Sorry, you do not have permission",
-  "require_mention": false,
-  "filter_thinking": true,
-  "filter_tool_messages": true,
-  "message_format": "auto"
-}', FALSE,
-        'DingTalk bot channel. Supports Stream callback and sessionWebhook reply. Create app on DingTalk Open Platform and set Webhook URL to /api/v1/channels/webhook/dingtalk', NOW(), NOW(), 0);
-
--- 3. Feishu (disabled by default, requires app_id/app_secret)
-MERGE INTO mate_channel (id, name, channel_type, agent_id, bot_prefix, config_json, enabled, description, create_time, update_time, deleted)
-KEY (id)
-VALUES (1000000003, 'Feishu Bot', 'feishu', 1000000001, '', '{
-  "app_id": "",
-  "app_secret": "",
-  "encrypt_key": "",
-  "verification_token": "",
-  "dm_policy": "open",
-  "group_policy": "open",
-  "allow_from": [],
-  "deny_message": "Sorry, you do not have permission",
-  "require_mention": false,
-  "filter_thinking": true,
-  "filter_tool_messages": true,
-  "message_format": "auto"
-}', FALSE,
-        'Feishu bot channel. Supports event subscription callback. Create app on Feishu Open Platform and set event callback URL to /api/v1/channels/webhook/feishu', NOW(), NOW(), 0);
-
--- 4. Telegram (disabled by default, requires bot_token)
-MERGE INTO mate_channel (id, name, channel_type, agent_id, bot_prefix, config_json, enabled, description, create_time, update_time, deleted)
-KEY (id)
-VALUES (1000000004, 'Telegram Bot', 'telegram', 1000000001, '', '{
-  "bot_token": "",
-  "http_proxy": "",
-  "show_typing": true,
-  "dm_policy": "open",
-  "group_policy": "open",
-  "allow_from": [],
-  "deny_message": "Sorry, you do not have permission",
-  "require_mention": false,
-  "filter_thinking": true,
-  "filter_tool_messages": true,
-  "message_format": "auto"
-}', FALSE,
-        'Telegram bot channel. Get Token from @BotFather, set Webhook URL to /api/v1/channels/webhook/telegram', NOW(), NOW(), 0);
-
--- 5. Discord (disabled by default, requires bot_token)
-MERGE INTO mate_channel (id, name, channel_type, agent_id, bot_prefix, config_json, enabled, description, create_time, update_time, deleted)
-KEY (id)
-VALUES (1000000005, 'Discord Bot', 'discord', 1000000001, '!mc ', '{
-  "bot_token": "",
-  "http_proxy": "",
-  "dm_policy": "open",
-  "group_policy": "open",
-  "allow_from": [],
-  "deny_message": "Sorry, you do not have permission",
-  "require_mention": false,
-  "filter_thinking": true,
-  "filter_tool_messages": true,
-  "message_format": "auto"
-}', FALSE,
-        'Discord bot channel. Create Bot and get Token from Discord Developer Portal. Use !mc prefix in group chats', NOW(), NOW(), 0);
-
--- 6. WeCom Bot (disabled by default, requires bot_id/secret)
-MERGE INTO mate_channel (id, name, channel_type, agent_id, bot_prefix, config_json, enabled, description, create_time, update_time, deleted)
-KEY (id)
-VALUES (1000000006, 'WeCom Bot', 'wecom', 1000000001, '', '{
-  "bot_id": "",
-  "secret": "",
-  "welcome_text": "",
-  "media_download_enabled": true,
-  "media_dir": "data/media",
-  "dm_policy": "open",
-  "group_policy": "open",
-  "allow_from": [],
-  "deny_message": "Sorry, you do not have permission",
-  "require_mention": false,
-  "filter_thinking": true,
-  "filter_tool_messages": true,
-  "message_format": "auto",
-  "max_reconnect_attempts": -1
-}', FALSE,
-        'WeCom smart bot channel (WebSocket long connection). Create a smart bot in WeCom admin console, select API mode with long connection, get bot_id and secret. No public IP needed', NOW(), NOW(), 0);
-
--- 7. QQ Bot (disabled by default, requires app_id/client_secret)
-MERGE INTO mate_channel (id, name, channel_type, agent_id, bot_prefix, config_json, enabled, description, create_time, update_time, deleted)
-KEY (id)
-VALUES (1000000007, 'QQ Bot', 'qq', 1000000001, '', '{
-  "app_id": "",
-  "client_secret": "",
-  "markdown_enabled": true,
-  "max_reconnect_attempts": 100,
-  "dm_policy": "open",
-  "group_policy": "open",
-  "allow_from": [],
-  "deny_message": "Sorry, you do not have permission",
-  "require_mention": false,
-  "filter_thinking": true,
-  "filter_tool_messages": true,
-  "message_format": "auto"
-}', FALSE,
-        'QQ bot channel (WebSocket long connection). Create a bot app on QQ Open Platform, get AppID and AppSecret. No public IP needed', NOW(), NOW(), 0);
-
--- 8. WeChat iLink Bot (disabled by default, requires QR code scan for bot_token)
-MERGE INTO mate_channel (id, name, channel_type, agent_id, bot_prefix, config_json, enabled, description, create_time, update_time, deleted)
-KEY (id)
-VALUES (1000000008, 'WeChat', 'weixin', 1000000001, '', '{
-  "bot_token": "",
-  "base_url": "https://ilinkai.weixin.qq.com",
-  "media_download_enabled": true,
-  "media_dir": "data/media",
-  "dm_policy": "open",
-  "group_policy": "open",
-  "allow_from": [],
-  "deny_message": "Sorry, you do not have permission",
-  "filter_thinking": true,
-  "filter_tool_messages": true,
-  "message_format": "auto"
-}', FALSE,
-        'WeChat personal account channel (iLink Bot HTTP long polling). Get bot_token by scanning QR code to login, or enter existing token. Based on iLink Bot API, supports text, image, voice (ASR), file, and video messages', NOW(), NOW(), 0);
-
--- 9. Slack (disabled by default, requires bot_token / app_token)
-MERGE INTO mate_channel (id, name, channel_type, agent_id, bot_prefix, config_json, enabled, description, create_time, update_time, deleted)
-KEY (id)
-VALUES (1000000009, 'Slack Bot', 'slack', 1000000001, '', '{
-  "bot_token": "",
-  "app_token": "",
-  "signing_secret": "",
-  "dm_policy": "open",
-  "group_policy": "mention",
-  "allow_from": [],
-  "deny_message": "Sorry, you do not have permission",
-  "filter_thinking": true,
-  "filter_tool_messages": true,
-  "message_format": "auto"
-}', FALSE,
-        'Slack channel (Socket Mode). Get Bot Token (xoxb-) and App-Level Token (xapp-) from Slack App settings, enable Socket Mode to start using.', NOW(), NOW(), 0);
 
 -- ==================== Example Cron Jobs ====================
 MERGE INTO mate_cron_job (id, name, cron_expression, timezone, agent_id, task_type, trigger_message, request_body, enabled, create_time, update_time, deleted)

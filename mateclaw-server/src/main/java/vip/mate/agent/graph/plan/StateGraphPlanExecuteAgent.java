@@ -45,16 +45,28 @@ public class StateGraphPlanExecuteAgent extends BaseAgent implements StructuredS
     private final PlanningService planningService;
     private final org.springframework.ai.chat.model.ChatModel chatModel;
     private final ConversationWindowManager conversationWindowManager;
+    /** Held only so context-window budget includes the tools schema. Nullable for legacy constructor. */
+    private final vip.mate.agent.AgentToolSet toolSet;
 
     public StateGraphPlanExecuteAgent(ChatClient chatClient, ConversationService conversationService,
                                       CompiledGraph compiledGraph, PlanningService planningService,
                                       org.springframework.ai.chat.model.ChatModel chatModel,
                                       ConversationWindowManager conversationWindowManager) {
+        this(chatClient, conversationService, compiledGraph, planningService,
+                chatModel, conversationWindowManager, null);
+    }
+
+    public StateGraphPlanExecuteAgent(ChatClient chatClient, ConversationService conversationService,
+                                      CompiledGraph compiledGraph, PlanningService planningService,
+                                      org.springframework.ai.chat.model.ChatModel chatModel,
+                                      ConversationWindowManager conversationWindowManager,
+                                      vip.mate.agent.AgentToolSet toolSet) {
         super(chatClient, conversationService);
         this.compiledGraph = compiledGraph;
         this.planningService = planningService;
         this.chatModel = chatModel;
         this.conversationWindowManager = conversationWindowManager;
+        this.toolSet = toolSet;
     }
 
     @Override
@@ -254,7 +266,8 @@ public class StateGraphPlanExecuteAgent extends BaseAgent implements StructuredS
                     maxInputTokens,
                     chatModel,
                     conversationId,
-                    parsedAgentId);
+                    parsedAgentId,
+                    toolSet != null ? toolSet.callbacks() : null);
         }
 
         List<Message> messages = new ArrayList<>(historyMessages);
@@ -285,6 +298,19 @@ public class StateGraphPlanExecuteAgent extends BaseAgent implements StructuredS
         inputs.put(MateClawStateKeys.RUNTIME_MODEL_NAME, modelName != null ? modelName : "");
         inputs.put(MateClawStateKeys.RUNTIME_PROVIDER_ID, runtimeProviderId != null ? runtimeProviderId : "");
         inputs.put(MateClawStateKeys.TRACE_ID, UUID.randomUUID().toString().substring(0, 8));
+
+        // RFC-063r §2.5: same as ReAct path — enrich and store the ChatOrigin
+        // so StepExecutionNode (and any sub-graphs spawned via DelegateAgentTool)
+        // can read it back from state.
+        vip.mate.agent.context.ChatOrigin origin = vip.mate.agent.context.ChatOriginHolder.get();
+        Long parsedAgentIdForOrigin = null;
+        try { parsedAgentIdForOrigin = agentId != null ? Long.valueOf(agentId) : null; } catch (Exception ignored) {}
+        if (parsedAgentIdForOrigin != null) {
+            origin = origin.withAgent(parsedAgentIdForOrigin);
+        }
+        origin = origin.withConversationId(conversationId)
+                .withWorkspace(origin.workspaceId(), workspaceBasePath);
+        inputs.put(MateClawStateKeys.CHAT_ORIGIN, origin);
         return inputs;
     }
 

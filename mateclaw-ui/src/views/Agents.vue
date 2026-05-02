@@ -42,7 +42,9 @@
             :class="{ 'agent-card--disabled': !agent.enabled }"
           >
             <div class="agent-card__header">
-              <span class="agent-card__icon">{{ agent.icon || '🤖' }}</span>
+              <span class="agent-card__icon">
+                <SkillIcon :value="agent.icon" :size="36" :fallback="'🤖'" />
+              </span>
               <label class="toggle-switch toggle-switch--sm">
                 <input type="checkbox" :checked="agent.enabled" @change="toggleAgent(agent)" />
                 <span class="toggle-slider"></span>
@@ -137,6 +139,13 @@
       </div>
     </div>
 
+    <!-- Shared icon picker — opened from the Basic tab's [Pick icon] button. -->
+    <SkillIconPicker
+      v-model:visible="iconPickerVisible"
+      :model-value="form.icon"
+      @apply="(v: string) => (form.icon = v)"
+    />
+
     <!-- Create/Edit Modal -->
     <div v-if="showModal" class="modal-overlay">
       <div class="modal">
@@ -176,7 +185,13 @@
             </div>
             <div class="form-group">
               <label class="form-label">{{ t('agents.fields.icon') }}</label>
-              <input v-model="form.icon" class="form-input" :placeholder="t('agents.placeholders.icon')" />
+              <button type="button" class="icon-picker-trigger" @click="iconPickerVisible = true">
+                <SkillIcon :value="form.icon" :size="24" :fallback="'🤖'" />
+                <span class="icon-picker-trigger__label">
+                  {{ form.icon || t('common.iconPicker.none') }}
+                </span>
+                <span class="icon-picker-trigger__action">{{ t('common.iconPicker.pickerOpen') }}</span>
+              </button>
             </div>
             <div class="form-group">
               <label class="form-label">{{ t('agents.fields.type') }}</label>
@@ -188,6 +203,18 @@
             <div class="form-group">
               <label class="form-label">{{ t('agents.fields.maxIterations') }}</label>
               <input v-model.number="form.maxIterations" type="number" min="1" max="50" class="form-input" />
+            </div>
+            <!-- RFC-03 Lane G1: per-Agent model override. Empty value falls
+                 back to the global default in ModelConfigService.resolveModel. -->
+            <div class="form-group">
+              <label class="form-label">{{ t('agents.fields.modelName') }}</label>
+              <select v-model="form.modelName" class="form-input">
+                <option value="">{{ t('agents.fields.modelGlobalDefault') }}</option>
+                <option v-for="m in availableModels" :key="m.id" :value="m.modelName">
+                  {{ m.name }} ({{ m.provider }}/{{ m.modelName }})
+                </option>
+              </select>
+              <p class="form-hint">{{ t('agents.fields.modelHint') }}</p>
             </div>
             <div class="form-group">
               <label class="form-label">{{ t('agents.fields.defaultThinkingLevel') }}</label>
@@ -233,7 +260,7 @@
                 :class="{ selected: selectedSkillIds.includes(skill.id) }"
               >
                 <input type="checkbox" :value="skill.id" v-model="selectedSkillIds" class="binding-checkbox" />
-                <span class="binding-icon">{{ skill.icon || '🧩' }}</span>
+                <span class="binding-icon"><SkillIcon :value="skill.icon" :size="20" :fallback="'🧩'" /></span>
                 <div class="binding-info">
                   <span class="binding-name">{{ skill.name }}</span>
                   <span v-if="skill.description" class="binding-desc">{{ skill.description?.slice(0, 80) }}</span>
@@ -243,26 +270,39 @@
             </div>
           </div>
 
-          <!-- Tools Tab -->
+          <!-- Tools Tab — RFC-090 §9.2 调整 B: Advanced bypass for atomic
+               tools not packaged as skills (e.g. datetime, delegate_agent).
+               Skill bindings already auto-expand allowed-tools (§14.2), so
+               the picker is collapsed by default to reduce noise. -->
           <div v-if="modalTab === 'tools'" class="binding-tab">
-            <p class="binding-hint">{{ t('agents.binding.toolsHint') }}</p>
-            <div v-if="availableTools.length === 0" class="binding-empty">{{ t('agents.binding.noTools') }}</div>
-            <div v-else class="binding-list">
-              <label
-                v-for="tool in availableTools"
-                :key="tool.name"
-                class="binding-item"
-                :class="{ selected: selectedToolNames.includes(tool.name) }"
-              >
-                <input type="checkbox" :value="tool.name" v-model="selectedToolNames" class="binding-checkbox" />
-                <span class="binding-icon">{{ tool.icon || '🔧' }}</span>
-                <div class="binding-info">
-                  <span class="binding-name">{{ tool.displayName || tool.name }}</span>
-                  <span v-if="tool.description" class="binding-desc">{{ tool.description?.slice(0, 80) }}</span>
-                </div>
-                <span class="binding-type-badge">{{ tool.toolType }}</span>
-              </label>
-            </div>
+            <details class="advanced-tools" :open="selectedToolNames.length > 0 || advancedToolsOpen">
+              <summary class="advanced-tools-summary" @click.prevent="advancedToolsOpen = !advancedToolsOpen">
+                <span class="advanced-tools-title">
+                  {{ t('agents.binding.advancedToolsTitle') }}
+                  <span v-if="selectedToolNames.length > 0" class="advanced-tools-count">{{ selectedToolNames.length }}</span>
+                </span>
+                <span class="advanced-tools-chevron">{{ (advancedToolsOpen || selectedToolNames.length > 0) ? '▾' : '▸' }}</span>
+              </summary>
+              <p class="binding-hint">{{ t('agents.binding.toolsHint') }}</p>
+              <p class="binding-hint advanced-tools-note">{{ t('agents.binding.advancedToolsHint') }}</p>
+              <div v-if="availableTools.length === 0" class="binding-empty">{{ t('agents.binding.noTools') }}</div>
+              <div v-else class="binding-list">
+                <label
+                  v-for="tool in availableTools"
+                  :key="tool.name"
+                  class="binding-item"
+                  :class="{ selected: selectedToolNames.includes(tool.name) }"
+                >
+                  <input type="checkbox" :value="tool.name" v-model="selectedToolNames" class="binding-checkbox" />
+                  <span class="binding-icon"><SkillIcon :value="tool.icon" :size="20" :fallback="'🔧'" /></span>
+                  <div class="binding-info">
+                    <span class="binding-name">{{ tool.displayName || tool.name }}</span>
+                    <span v-if="tool.description" class="binding-desc">{{ tool.description?.slice(0, 80) }}</span>
+                  </div>
+                  <span class="binding-type-badge">{{ tool.toolType }}</span>
+                </label>
+              </div>
+            </details>
           </div>
 
           <!-- Providers Tab (RFC-009 PR-3) -->
@@ -312,9 +352,12 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
+import { mcConfirm } from '@/components/common/useConfirm'
 import { agentApi, agentBindingApi, modelApi, skillApi, toolApi, templateApi } from '@/api/index'
 import type { Agent } from '@/types/index'
+import SkillIcon from '@/components/common/SkillIcon.vue'
+import SkillIconPicker from '@/components/common/SkillIconPicker.vue'
 
 const router = useRouter()
 const { t } = useI18n()
@@ -324,6 +367,10 @@ const activeFilter = ref('all')
 const showModal = ref(false)
 const editingAgent = ref<Agent | null>(null)
 const modalTab = ref<'basic' | 'skills' | 'tools' | 'providers'>('basic')
+/** RFC-090 §9.2 调整 B — Tool picker is an Advanced bypass; collapsed by
+ *  default but stays open as soon as the agent has any direct tool
+ *  bindings, so existing users don't lose visibility on their picks. */
+const advancedToolsOpen = ref(false)
 
 // Binding state
 const availableSkills = ref<any[]>([])
@@ -333,6 +380,9 @@ const selectedToolNames = ref<string[]>([])
 // RFC-009 PR-3: per-agent provider preference order
 const availableProviders = ref<{ id: string; name: string }[]>([])
 const selectedProviderIds = ref<string[]>([])
+// RFC-03 Lane G1: per-Agent model override picker — populated from the
+// global enabled-models list, blank value means "fall back to default".
+const availableModels = ref<Array<{ id: number; name: string; provider: string; modelName: string }>>([])
 
 // Template selector state
 const showTemplateSelector = ref(false)
@@ -352,14 +402,19 @@ const defaultForm = (): Partial<Agent> & { name: string; defaultThinkingLevel: s
   description: '',
   agentType: 'react',
   systemPrompt: '',
+  modelName: '', // RFC-03 G1 — empty means "use global default"
   maxIterations: 10,
-  icon: '🤖',
+  // Empty so SkillIcon's fallback (🤖) shows instead of pinning a literal
+  // emoji into form.icon — otherwise the picker thinks the user picked
+  // the robot emoji explicitly and reopens on the Emoji tab.
+  icon: '',
   tags: '',
   enabled: true,
   defaultThinkingLevel: null,
 })
 
 const form = ref(defaultForm())
+const iconPickerVisible = ref(false)
 
 const filteredAgents = computed(() => {
   let list = agents.value
@@ -380,6 +435,9 @@ const filteredAgents = computed(() => {
 
 onMounted(() => {
   loadAgents()
+  // RFC-03 G1: load models once for the per-Agent override dropdown.
+  // Failure is non-fatal — the dropdown just shows only "global default".
+  loadAvailableModels()
 })
 
 async function loadAgents() {
@@ -388,6 +446,20 @@ async function loadAgents() {
     agents.value = res.data || []
   } catch {
     ElMessage.error(t('agents.messages.loadFailed'))
+  }
+}
+
+async function loadAvailableModels() {
+  try {
+    const res: any = await modelApi.listEnabled()
+    availableModels.value = (res.data || []).map((m: any) => ({
+      id: m.id,
+      name: m.name,
+      provider: m.provider,
+      modelName: m.modelName,
+    }))
+  } catch {
+    // Silent — the picker still works (empty list = only "default" option).
   }
 }
 
@@ -476,8 +548,9 @@ async function openEditModal(agent: Agent) {
     description: agent.description || '',
     agentType: agent.agentType,
     systemPrompt: agent.systemPrompt || '',
+    modelName: agent.modelName || '',
     maxIterations: agent.maxIterations,
-    icon: agent.icon || '🤖',
+    icon: agent.icon || '',
     tags: agent.tags || '',
     enabled: agent.enabled,
     defaultThinkingLevel: (agent as any).defaultThinkingLevel || null,
@@ -552,11 +625,12 @@ async function saveAgent() {
 }
 
 async function deleteAgent(agent: Agent) {
-  try {
-    await ElMessageBox.confirm(t('agents.messages.deleteConfirm'), t('agents.actions.delete'), { type: 'warning' })
-  } catch {
-    return
-  }
+  const ok = await mcConfirm({
+    title: t('agents.actions.delete'),
+    message: t('agents.messages.deleteConfirm'),
+    tone: 'danger',
+  })
+  if (!ok) return
   try {
     await agentApi.delete(agent.id)
     ElMessage.success(t('agents.messages.deleteSuccess'))
@@ -868,4 +942,51 @@ async function toggleAgent(agent: Agent) {
 
 .template-tags { display: flex; flex-wrap: wrap; gap: 4px; align-self: flex-start; margin-top: 2px; }
 .tag-chip { font-size: 11px; padding: 2px 8px; background: var(--mc-bg-sunken); color: var(--mc-text-tertiary); border-radius: 999px; white-space: nowrap; }
+
+/* RFC-090 §9.2 调整 B — Advanced Tools picker (collapsed by default) */
+.advanced-tools { border: 1px dashed var(--mc-border); border-radius: 12px; padding: 0; }
+.advanced-tools[open] { padding: 12px 14px; }
+.advanced-tools-summary { list-style: none; cursor: pointer; padding: 12px 14px; display: flex; align-items: center; justify-content: space-between; gap: 8px; user-select: none; color: var(--mc-text-secondary); font-size: 13px; font-weight: 600; }
+.advanced-tools-summary::-webkit-details-marker { display: none; }
+.advanced-tools[open] > .advanced-tools-summary { padding: 0 0 8px; border-bottom: 1px solid var(--mc-border-light); margin-bottom: 8px; }
+.advanced-tools-title { display: inline-flex; align-items: center; gap: 8px; }
+.advanced-tools-count { padding: 1px 8px; background: var(--mc-primary-bg); color: var(--mc-primary); border-radius: 999px; font-size: 11px; font-weight: 700; }
+.advanced-tools-chevron { color: var(--mc-text-tertiary); font-size: 12px; }
+.advanced-tools-note { font-style: italic; color: var(--mc-text-tertiary); margin-top: 4px; }
+
+/* Icon picker trigger — replaces the old free-text icon input. Tile shape
+ * mirrors SkillMarket's identity-icon-row so the create/edit affordance
+ * is consistent across the app. */
+.icon-picker-trigger {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--mc-border);
+  border-radius: 8px;
+  background: var(--mc-bg-sunken);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.15s, background 0.15s;
+  width: 100%;
+}
+.icon-picker-trigger:hover { border-color: var(--mc-primary); background: var(--mc-bg-elevated); }
+.icon-picker-trigger:focus-visible { outline: none; border-color: var(--mc-primary); box-shadow: 0 0 0 2px rgba(217,119,87,0.15); }
+.icon-picker-trigger__label {
+  flex: 1; min-width: 0;
+  font-size: 13px;
+  color: var(--mc-text-primary);
+  font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.icon-picker-trigger__action {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--mc-primary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
 </style>

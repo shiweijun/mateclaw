@@ -8,7 +8,11 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import vip.mate.system.featureflag.FeatureFlagService;
 import vip.mate.tool.builtin.DocumentExtractTool;
+import vip.mate.tool.image.vision.ImageVisionService;
+import vip.mate.tool.image.vision.VisionRequest;
+import vip.mate.tool.image.vision.VisionResult;
 import vip.mate.wiki.WikiProperties;
 import vip.mate.wiki.event.WikiProcessingEvent;
 import vip.mate.wiki.model.WikiRawMaterialEntity;
@@ -31,6 +35,8 @@ import java.util.concurrent.ConcurrentHashMap;
 @RequiredArgsConstructor
 public class WikiRawMaterialService {
 
+    private static final String VISION_FLAG_KEY = "wiki.ocr.enabled";
+
     private final WikiRawMaterialMapper rawMapper;
     private final WikiKnowledgeBaseService kbService;
     private final WikiProperties properties;
@@ -38,6 +44,9 @@ public class WikiRawMaterialService {
     private final DocumentExtractTool documentExtractTool;
     /** RFC-013：删除时级联清理 chunk */
     private final WikiChunkService chunkService;
+    private final ImageVisionService imageVisionService;
+    private final PdfImageExtractor pdfImageExtractor;
+    private final FeatureFlagService featureFlagService;
 
     /**
      * RFC-012 follow-up #3：从 partial 状态触发的 reprocess 会在此 set 中打标，
@@ -119,15 +128,33 @@ public class WikiRawMaterialService {
     }
 
     /**
-     * 添加文件类型的原始材料（PDF/DOCX 等）
+     * Adds a file-type raw material (PDF / DOCX / image / ...).
+     *
+     * <p>Backwards-compatible overload that omits the MIME type. Callers
+     * with the upload Content-Type in hand should prefer the four-argument
+     * variant — image-routing in particular needs an authoritative MIME so
+     * downstream vision providers know what they are decoding.
      */
     @Transactional
     public WikiRawMaterialEntity addFile(Long kbId, String title, String sourceType,
                                           String sourcePath, long fileSize) {
+        return addFile(kbId, title, sourceType, null, sourcePath, fileSize);
+    }
+
+    /**
+     * Adds a file-type raw material with explicit MIME type.
+     *
+     * @param mimeType Content-Type string from the upload (e.g. {@code image/png});
+     *                 may be null if unknown
+     */
+    @Transactional
+    public WikiRawMaterialEntity addFile(Long kbId, String title, String sourceType,
+                                          String mimeType, String sourcePath, long fileSize) {
         WikiRawMaterialEntity entity = new WikiRawMaterialEntity();
         entity.setKbId(kbId);
         entity.setTitle(title);
         entity.setSourceType(sourceType);
+        entity.setMimeType(mimeType);
         entity.setSourcePath(sourcePath);
         entity.setFileSize(fileSize);
         entity.setProcessingStatus("pending");
@@ -314,6 +341,13 @@ public class WikiRawMaterialService {
         if ("text".equals(entity.getSourceType())) {
             return entity.getOriginalContent();
         }
+        // Image source: route through the vision-in pipeline. Failures (feature
+        // flag off, no provider configured, all providers failed) degrade to an
+        // empty caption rather than blocking the upload — the user keeps the
+        // raw row and can retry once vision is configured.
+        if ("image".equals(entity.getSourceType())) {
+            return extractTextFromImage(entity);
+        }
         // 二进制文件：调用 DocumentExtractTool 提取
         if (entity.getSourcePath() != null && !entity.getSourcePath().isBlank()) {
             try {
@@ -323,17 +357,23 @@ public class WikiRawMaterialService {
                     String text = json.getStr("text");
                     if (text != null && !text.isBlank()) {
                         boolean truncated = json.getBool("truncated", false);
+                        // Append inline-image captions for PDFs so chunk-level search
+                        // hits chart/diagram contents that the text extractor missed.
+                        // Failures are non-fatal: the body text is still returned.
+                        String enriched = appendPdfImageCaptions(entity, text);
+
                         if (truncated) {
-                            // 截断的结果不缓存，避免永久丢失后半内容。返回文本供分块处理使用。
+                            // Truncated results are not cached so we don't lose the tail
+                            // permanently — we still return the text for chunking use.
                             log.warn("[Wiki] Extracted text truncated at {} chars for: {} (full document may be larger)",
                                     text.length(), entity.getSourcePath());
                         } else {
-                            // Full extraction: cache to avoid re-extracting on subsequent calls.
-                            updateExtractedText(entity.getId(), text);
+                            updateExtractedText(entity.getId(), enriched);
                         }
-                        log.info("[Wiki] Extracted text from {}: {} chars, method={}, truncated={}",
-                                entity.getSourcePath(), text.length(), json.getStr("method"), truncated);
-                        return text;
+                        log.info("[Wiki] Extracted text from {}: {} chars (text) → {} chars (enriched), method={}, truncated={}, cached={}",
+                                entity.getSourcePath(), text.length(), enriched.length(),
+                                json.getStr("method"), truncated, !truncated);
+                        return enriched;
                     }
                 }
                 log.warn("[Wiki] Document extraction returned no text for: {}", entity.getSourcePath());
@@ -342,6 +382,116 @@ public class WikiRawMaterialService {
             }
         }
         return entity.getOriginalContent();
+    }
+
+    /**
+     * For PDF raw materials, walks the inline images and appends a section of
+     * {@code [图 P{n}#{m}]: <caption>} markers so downstream chunking and
+     * search can index image contents.
+     *
+     * <p>When {@link #VISION_FLAG_KEY} is off, returns the body unchanged
+     * without re-parsing the PDF — the operator's "off = ignore images"
+     * intent. Flipping the flag on later requires a manual reprocess for
+     * existing rows to pick up captions.
+     */
+    private String appendPdfImageCaptions(WikiRawMaterialEntity entity, String body) {
+        if (!"pdf".equals(entity.getSourceType()) || pdfImageExtractor == null) {
+            return body;
+        }
+        if (featureFlagService == null || !featureFlagService.isEnabled(VISION_FLAG_KEY)) {
+            return body;
+        }
+
+        java.nio.file.Path pdfPath = java.nio.file.Paths.get(entity.getSourcePath());
+        try {
+            List<String> snippets = pdfImageExtractor.captionInlineImages(pdfPath);
+            if (snippets.isEmpty()) {
+                return body;
+            }
+            StringBuilder sb = new StringBuilder(body);
+            sb.append("\n\n--- Inline images ---\n");
+            for (String snippet : snippets) {
+                sb.append(snippet).append('\n');
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            log.warn("[Wiki] PDF inline-image captioning failed for id={}: {}",
+                    entity.getId(), e.getMessage());
+            return body;
+        }
+    }
+
+    /**
+     * Routes an image-typed raw material through the vision-in pipeline,
+     * caches the resulting caption into {@code extracted_text} so the next
+     * call short-circuits, and degrades gracefully on failure.
+     *
+     * <p>Failure modes (feature flag off, no provider, all providers failed,
+     * IO errors reading the image bytes) are intentionally swallowed and
+     * surfaced as the empty string. The upload still succeeded; the raw
+     * row remains and downstream code is expected to tolerate "no
+     * extracted text yet" — calling this method again later (e.g. after
+     * an operator enables the feature flag) re-runs the pipeline.
+     */
+    private String extractTextFromImage(WikiRawMaterialEntity entity) {
+        if (entity.getSourcePath() == null || entity.getSourcePath().isBlank()) {
+            log.warn("[Wiki] Image raw material missing sourcePath: id={}", entity.getId());
+            return "";
+        }
+        if (featureFlagService == null || !featureFlagService.isEnabled(VISION_FLAG_KEY)) {
+            log.info("[Wiki] Image raw id={} skipped: {} is disabled",
+                    entity.getId(), VISION_FLAG_KEY);
+            return "";
+        }
+        byte[] imageBytes;
+        try {
+            imageBytes = java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(entity.getSourcePath()));
+        } catch (Exception e) {
+            log.error("[Wiki] Failed to read image bytes for id={}: {}", entity.getId(), e.getMessage());
+            return "";
+        }
+
+        VisionRequest request = VisionRequest.builder()
+                .imageBytes(imageBytes)
+                .mimeType(resolveMimeType(entity))
+                .build();
+        VisionResult result;
+        try {
+            result = imageVisionService.caption(request);
+        } catch (Exception e) {
+            log.warn("[Wiki] Vision pipeline failed for raw id={}: {}", entity.getId(), e.getMessage());
+            return "";
+        }
+
+        StringBuilder text = new StringBuilder(result.getCaption() == null ? "" : result.getCaption());
+        if (result.getVisibleText() != null && !result.getVisibleText().isBlank()) {
+            text.append("\n\n--- Visible text ---\n").append(result.getVisibleText());
+        }
+        String combined = text.toString();
+        updateExtractedText(entity.getId(), combined);
+        log.info("[Wiki] Image vision captioned raw id={} provider={} model={} chars={}",
+                entity.getId(), result.getProviderId(), result.getModel(), combined.length());
+        return combined;
+    }
+
+    /** Best-effort MIME resolution: prefer the persisted column, fall back to file extension. */
+    private static String resolveMimeType(WikiRawMaterialEntity entity) {
+        if (entity.getMimeType() != null && !entity.getMimeType().isBlank()) {
+            return entity.getMimeType();
+        }
+        String path = entity.getSourcePath() == null ? "" : entity.getSourcePath().toLowerCase();
+        int dot = path.lastIndexOf('.');
+        if (dot < 0) return "application/octet-stream";
+        String ext = path.substring(dot + 1);
+        return switch (ext) {
+            case "png" -> "image/png";
+            case "jpg", "jpeg" -> "image/jpeg";
+            case "webp" -> "image/webp";
+            case "gif" -> "image/gif";
+            case "bmp" -> "image/bmp";
+            case "tiff", "tif" -> "image/tiff";
+            default -> "application/octet-stream";
+        };
     }
 
     /**

@@ -53,15 +53,32 @@ public class StateGraphReActAgent extends BaseAgent implements StructuredStreamC
     private final CompiledGraph compiledGraph;
     private final org.springframework.ai.chat.model.ChatModel chatModel;
     private final ConversationWindowManager conversationWindowManager;
+    /**
+     * Held only so {@link #buildInitialState} can include the tools schema in
+     * the context-window budget — those bytes ride along on every LLM call
+     * and were previously ignored, making compression decisions fire late.
+     * Nullable for the legacy 5-arg constructor used by older tests.
+     */
+    private final vip.mate.agent.AgentToolSet toolSet;
 
     public StateGraphReActAgent(ChatClient chatClient, ConversationService conversationService,
                                 CompiledGraph compiledGraph,
                                 org.springframework.ai.chat.model.ChatModel chatModel,
                                 ConversationWindowManager conversationWindowManager) {
+        this(chatClient, conversationService, compiledGraph, chatModel,
+                conversationWindowManager, null);
+    }
+
+    public StateGraphReActAgent(ChatClient chatClient, ConversationService conversationService,
+                                CompiledGraph compiledGraph,
+                                org.springframework.ai.chat.model.ChatModel chatModel,
+                                ConversationWindowManager conversationWindowManager,
+                                vip.mate.agent.AgentToolSet toolSet) {
         super(chatClient, conversationService);
         this.compiledGraph = compiledGraph;
         this.chatModel = chatModel;
         this.conversationWindowManager = conversationWindowManager;
+        this.toolSet = toolSet;
     }
 
     @Override
@@ -372,7 +389,8 @@ public class StateGraphReActAgent extends BaseAgent implements StructuredStreamC
                     maxInputTokens,
                     chatModel,
                     conversationId,
-                    parsedAgentId);
+                    parsedAgentId,
+                    toolSet != null ? toolSet.callbacks() : null);
         }
 
         List<Message> messages = new ArrayList<>(historyMessages);
@@ -410,6 +428,19 @@ public class StateGraphReActAgent extends BaseAgent implements StructuredStreamC
         inputs.put(RUNTIME_MODEL_NAME, modelName != null ? modelName : "");
         inputs.put(RUNTIME_PROVIDER_ID, runtimeProviderId != null ? runtimeProviderId : "");
         inputs.put(TRACE_ID, UUID.randomUUID().toString().substring(0, 8));
+
+        // RFC-063r §2.5: enrich the originating ChatOrigin with this agent's id
+        // and workspace, then write it into graph state so ActionNode +
+        // StepExecutionNode can forward it to ToolExecutionExecutor → ToolContext.
+        vip.mate.agent.context.ChatOrigin origin = vip.mate.agent.context.ChatOriginHolder.get();
+        Long parsedAgentIdForOrigin = null;
+        try { parsedAgentIdForOrigin = agentId != null ? Long.valueOf(agentId) : null; } catch (Exception ignored) {}
+        if (parsedAgentIdForOrigin != null) {
+            origin = origin.withAgent(parsedAgentIdForOrigin);
+        }
+        origin = origin.withConversationId(conversationId)
+                .withWorkspace(origin.workspaceId(), workspaceBasePath);
+        inputs.put(CHAT_ORIGIN, origin);
         return inputs;
     }
 

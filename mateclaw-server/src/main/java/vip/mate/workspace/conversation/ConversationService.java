@@ -21,6 +21,7 @@ import vip.mate.workspace.conversation.vo.MessageVO;
 
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.LocalDateTime;
@@ -452,7 +453,7 @@ public class ConversationService {
             switch (part.getType()) {
                 case "text" -> appendSegment(text, part.getText());
                 case "thinking", "tool_call", "parse_error" -> { /* skip — frontend reads these from contentParts directly */ }
-                case "file" -> appendSegment(text, "[附件] " + safe(part.getFileName()));
+                case "file" -> appendSegment(text, renderFilePart(part));
                 default -> appendSegment(text, part.getText());
             }
         }
@@ -492,6 +493,23 @@ public class ConversationService {
             return "新消息";
         }
         return rendered;
+    }
+
+    /**
+     * Render a "file" content part for the LLM prompt. The original filename can be
+     * non-ASCII (Chinese, emoji, …); the upload pipeline sanitizes those characters
+     * to underscores when storing on disk, so the LLM-visible name and the on-disk
+     * name diverge. Surface the actual server-side path here so any tool the LLM
+     * picks (read_file / extract_document_text / detect_file_type / …) can be called
+     * with a path that resolves directly, instead of relying on per-tool fallbacks.
+     */
+    private String renderFilePart(MessageContentPart part) {
+        String name = safe(part.getFileName());
+        String path = safe(part.getPath());
+        if (path.isBlank()) {
+            return "[附件] " + name;
+        }
+        return "[附件] " + name + "（路径: " + path + "）";
     }
 
     private void appendSegment(StringBuilder builder, String text) {
@@ -774,7 +792,17 @@ public class ConversationService {
      * 清理会话关联的附件文件
      */
     public void cleanAttachmentFiles(String conversationId) {
-        Path dir = UPLOAD_ROOT.resolve(conversationId);
+        Path dir;
+        try {
+            dir = UPLOAD_ROOT.resolve(conversationId);
+        } catch (InvalidPathException e) {
+            // Conversation id contains characters illegal on this filesystem
+            // (e.g. ':' in cron:<jobId> on Windows). No attachments could
+            // ever have been written under such an id on this OS, so there
+            // is nothing to clean.
+            log.debug("Skipping attachment cleanup for non-path-safe conversation id: {}", conversationId);
+            return;
+        }
         if (!Files.exists(dir)) {
             return;
         }

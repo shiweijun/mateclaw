@@ -59,6 +59,7 @@ import vip.mate.llm.model.ModelConfigEntity;
 import vip.mate.llm.model.ModelFamily;
 import vip.mate.llm.model.ModelProtocol;
 import vip.mate.llm.model.ModelProviderEntity;
+import vip.mate.llm.routing.ProviderRouter;
 import vip.mate.llm.service.ModelConfigService;
 import vip.mate.llm.service.ModelProviderService;
 import vip.mate.planning.service.PlanningService;
@@ -100,6 +101,8 @@ public class AgentGraphBuilder {
     private final ConversationService conversationService;
     private final ModelConfigService modelConfigService;
     private final ModelProviderService modelProviderService;
+    private final vip.mate.llm.service.ModelCapabilityService modelCapabilityService;
+    private final ProviderRouter providerRouter;
     private final PlanningService planningService;
     private final ToolGuardService toolGuardService;
     private final vip.mate.tool.guard.service.ToolGuardConfigService toolGuardConfigService;
@@ -140,16 +143,44 @@ public class AgentGraphBuilder {
         // 过滤掉 denied 工具，使模型完全看不到它们（防止 prompt injection 利用 schema）
         toolSet = toolSet.withDeniedToolsFiltered(toolGuardConfigService.getDeniedTools());
 
-        // Per-agent tool 绑定过滤：如果 agent 有自定义 tool 绑定，则只保留绑定的工具
-        Set<String> boundTools = agentBindingService.getBoundToolNames(entity.getId());
+        // RFC-090 §14.2 — single entry point that merges:
+        //   (a) tools expanded from bound skills' active features, and
+        //   (b) directly bound atomic tools (the Advanced bypass, §9.2 调整 B).
+        // Three-state semantics: null = no agent-level restriction (use
+        // global default); non-null (possibly empty) = explicit allowlist.
+        Set<String> boundTools = agentBindingService.getEffectiveToolNames(entity.getId());
         toolSet = toolSet.withAllowedToolsOnly(boundTools); // null = 全局默认
 
-        // 统一使用全局默认模型（AgentEntity.modelName 为历史残留字段，不参与运行时选择）
-        ModelConfigEntity runtimeModel;
+        // RFC-090 §9.2 调整 C — pick a primary model that satisfies
+        // the agent's bound-skill requires-model. Falls back to the
+        // global default when no preferred provider satisfies, so the
+        // existing "no default model" error path stays intact.
+        // Honor per-Agent model override when set.
+        // resolveModel() looks up entity.modelName in enabled-only models;
+        // null / blank / unmatched silently fall back to getDefaultModel(),
+        // preserving the legacy behavior for Agents without an override.
+        ModelConfigEntity globalDefault;
         try {
-            runtimeModel = modelConfigService.getDefaultModel();
+            globalDefault = modelConfigService.resolveModel(entity.getModelName());
         } catch (Exception e) {
             throw new MateClawException("err.agent.no_default_model", "无法构建 Agent：请先在「设置 → 模型」中配置并启用默认模型");
+        }
+        ModelConfigEntity runtimeModel;
+        try {
+            runtimeModel = providerRouter.selectPrimary(entity.getId(), globalDefault);
+            if (runtimeModel == null) runtimeModel = globalDefault;
+        } catch (Exception e) {
+            log.debug("[ProviderRouter] primary selection failed, falling back to global default: {}",
+                    e.getMessage());
+            runtimeModel = globalDefault;
+        }
+        // Even after the upgrade, log a WARN when the chosen primary
+        // still doesn't satisfy needs (e.g. no preferred provider was
+        // capable). The diagnostic is observability-only.
+        try {
+            providerRouter.diagnosePrimary(entity.getId(), runtimeModel);
+        } catch (Exception e) {
+            log.debug("[ProviderRouter] diagnostic failed: {}", e.getMessage());
         }
 
         ModelProviderEntity provider;
@@ -198,7 +229,7 @@ public class AgentGraphBuilder {
         }
         // Default 100 if DB row leaves max_iterations null; clamp per-agent overrides
         // to the hard ceiling (BaseAgent.MAX_ITERATIONS_HARD_CEILING) so a misconfigured
-        // row can never push an unbounded loop. Aligned with QwenPaw's 1..100 range.
+        // row can never push an unbounded loop. Effective range: 1..100.
         int rawMaxIter = entity.getMaxIterations() != null ? entity.getMaxIterations() : 100;
         int maxIter = Math.max(1, Math.min(rawMaxIter, BaseAgent.MAX_ITERATIONS_HARD_CEILING));
         if (maxIter != rawMaxIter) {
@@ -235,6 +266,8 @@ public class AgentGraphBuilder {
         agent.systemPrompt = enhancedPrompt;
         agent.maxIterations = maxIter;
         agent.modelName = runtimeModel.getModelName();
+        agent.modelCapabilities = modelCapabilityService.resolve(
+                runtimeModel.getModelName(), runtimeModel.getModalities());
         agent.runtimeProviderId = provider != null ? provider.getProviderId() : "";
         agent.temperature = runtimeModel.getTemperature();
         agent.maxTokens = runtimeModel.getMaxTokens();
@@ -274,7 +307,7 @@ public class AgentGraphBuilder {
         String reasoningEffort = resolveReasoningEffortForModel(runtimeModel);
         CompiledGraph compiledGraph = buildReActGraph(toolSet, chatModel, maxIter, reasoningEffort, runtimeModel, agentId);
         return new StateGraphReActAgent(chatClient, conversationService, compiledGraph,
-                chatModel, conversationWindowManager);
+                chatModel, conversationWindowManager, toolSet);
     }
 
     StateGraphPlanExecuteAgent buildPlanExecuteAgent(AgentToolSet toolSet, ModelConfigEntity runtimeModel, int maxIter) {
@@ -288,7 +321,7 @@ public class AgentGraphBuilder {
         String reasoningEffort = resolveReasoningEffortForModel(runtimeModel);
         CompiledGraph graph = buildPlanExecuteGraph(toolSet, chatModel, maxIter, reasoningEffort, runtimeModel, agentId);
         return new StateGraphPlanExecuteAgent(chatClient, conversationService, graph, planningService,
-                chatModel, conversationWindowManager);
+                chatModel, conversationWindowManager, toolSet);
     }
 
     CompiledGraph buildPlanExecuteGraph(AgentToolSet toolSet, ChatModel chatModel, int maxIterations, String reasoningEffort) {
@@ -310,6 +343,10 @@ public class AgentGraphBuilder {
                     primaryModelConfig != null ? primaryModelConfig.getProvider() : null,
                     providerPool);
             ToolExecutionExecutor executor = new ToolExecutionExecutor(toolSet, toolGuardService, approvalService, streamTracker, toolTimeoutProperties, toolResultStorage, toolConcurrencyRegistry);
+            // Issue #46: enable skill-aware "Tool not found" hint so when the
+            // LLM mis-calls a skill name as a tool, the response tells it
+            // the right invocation pattern instead of a dead-end error.
+            executor.setSkillRuntimeService(skillRuntimeService);
             PlanGenerationNode planGenerationNode = new PlanGenerationNode(chatModel, planningService, streamingHelper, conversationWindowManager, toolSet);
             StepExecutionNode stepExecutionNode = new StepExecutionNode(chatModel, toolSet, executor, planningService, streamTracker, reasoningEffort, streamingHelper, conversationWindowManager);
             PlanSummaryNode planSummaryNode = new PlanSummaryNode(chatModel, planningService, streamingHelper);
@@ -353,6 +390,25 @@ public class AgentGraphBuilder {
                     // 审批重放键
                     .addStrategy(MateClawStateKeys.FORCED_TOOL_CALL, KeyStrategy.REPLACE)
                     .addStrategy(MateClawStateKeys.PRE_APPROVED_TOOL_CALL, KeyStrategy.REPLACE)
+                    // RFC-063r §2.5: ChatOrigin must survive every node merge so
+                    // sub-graph nodes (StepExecutionNode + DelegateAgentTool's
+                    // child agents) can read the originating channel binding.
+                    // Without explicit REPLACE the framework's merge drops it
+                    // on multi-iteration paths — root cause of the channel-binding
+                    // flakiness reported on first deployment.
+                    .addStrategy(MateClawStateKeys.CHAT_ORIGIN, KeyStrategy.REPLACE)
+                    // Caught by StateKeyRegistrationCoverageTest — these state keys
+                    // were silently unregistered before the post-deploy audit.
+                    // WORKSPACE_BASE_PATH: written by buildInitialState; sub-graph
+                    //   tools read it via WorkspacePathGuard.
+                    // STOP_REQUESTED: external cancel flag checked by every node.
+                    // RETURN_DIRECT_TRIGGERED / DIRECT_TOOL_OUTPUTS (RFC-052):
+                    //   Plan-Execute itself doesn't trigger returnDirect, but
+                    //   DelegateAgentTool sub-agents could; register defensively.
+                    .addStrategy(MateClawStateKeys.WORKSPACE_BASE_PATH, KeyStrategy.REPLACE)
+                    .addStrategy(MateClawStateKeys.STOP_REQUESTED, KeyStrategy.REPLACE)
+                    .addStrategy(MateClawStateKeys.RETURN_DIRECT_TRIGGERED, KeyStrategy.REPLACE)
+                    .addStrategy(MateClawStateKeys.DIRECT_TOOL_OUTPUTS, KeyStrategy.REPLACE)
                     // Token Usage
                     .addStrategy(MateClawStateKeys.PROMPT_TOKENS, KeyStrategy.REPLACE)
                     .addStrategy(MateClawStateKeys.COMPLETION_TOKENS, KeyStrategy.REPLACE)
@@ -418,6 +474,10 @@ public class AgentGraphBuilder {
                     primaryModelConfig != null ? primaryModelConfig.getProvider() : null,
                     providerPool);
             ToolExecutionExecutor executor = new ToolExecutionExecutor(toolSet, toolGuardService, approvalService, streamTracker, toolTimeoutProperties, toolResultStorage, toolConcurrencyRegistry);
+            // Issue #46: enable skill-aware "Tool not found" hint so when the
+            // LLM mis-calls a skill name as a tool, the response tells it
+            // the right invocation pattern instead of a dead-end error.
+            executor.setSkillRuntimeService(skillRuntimeService);
             // PR-1.2 (RFC-049 L1-B): propagate the bound model's capability so ReasoningNode
             // can gate the ThinkingLevelHolder override explicitly, rather than inferring
             // capability from reasoningEffort == null.
@@ -483,6 +543,22 @@ public class AgentGraphBuilder {
                     .addStrategy(MateClawStateKeys.REQUESTER_ID, KeyStrategy.REPLACE)
                     // 审批重放
                     .addStrategy(MateClawStateKeys.FORCED_TOOL_CALL, KeyStrategy.REPLACE)
+                    // RFC-063r §2.5: ChatOrigin must survive every node merge so
+                    // ActionNode (and DelegateAgentTool's child agents) can read
+                    // the originating channel binding across multi-iteration ReAct
+                    // loops. Without explicit REPLACE the framework's merge drops
+                    // it after the first node transition — root cause of the
+                    // channel-binding flakiness reported on first deployment.
+                    .addStrategy(MateClawStateKeys.CHAT_ORIGIN, KeyStrategy.REPLACE)
+                    // Caught by StateKeyRegistrationCoverageTest — silently
+                    // unregistered before the audit. WORKSPACE_BASE_PATH from
+                    // initial state; STOP_REQUESTED is the external cancel flag;
+                    // RETURN_DIRECT_TRIGGERED / DIRECT_TOOL_OUTPUTS are RFC-052
+                    // returnDirect short-circuit signals consumed by ObservationDispatcher.
+                    .addStrategy(MateClawStateKeys.WORKSPACE_BASE_PATH, KeyStrategy.REPLACE)
+                    .addStrategy(MateClawStateKeys.STOP_REQUESTED, KeyStrategy.REPLACE)
+                    .addStrategy(MateClawStateKeys.RETURN_DIRECT_TRIGGERED, KeyStrategy.REPLACE)
+                    .addStrategy(MateClawStateKeys.DIRECT_TOOL_OUTPUTS, KeyStrategy.REPLACE)
                     // Token Usage
                     .addStrategy(MateClawStateKeys.PROMPT_TOKENS, KeyStrategy.REPLACE)
                     .addStrategy(MateClawStateKeys.COMPLETION_TOKENS, KeyStrategy.REPLACE)
@@ -667,6 +743,16 @@ public class AgentGraphBuilder {
         if (!preferred.isEmpty()) {
             providers = reorderByPreferences(providers, preferred);
             log.debug("[LlmFailover] agent={} preferences={} -> chain head reordered", agentId, preferred);
+        }
+
+        // RFC-090 §9.2 调整 C — second-pass reorder: lift providers
+        // that satisfy the bound-skill capability set (vision / video /
+        // audio) ahead of those that don't. Stable otherwise so the
+        // user-preferred order still wins among capable providers.
+        try {
+            providers = new ArrayList<>(providerRouter.reorderForCapabilities(agentId, providers));
+        } catch (Exception e) {
+            log.debug("[ProviderRouter] chain reorder failed: {}", e.getMessage());
         }
 
         List<vip.mate.llm.failover.FallbackEntry> chain = new ArrayList<>();
@@ -891,21 +977,26 @@ public class AgentGraphBuilder {
                 If you try to read a PDF/Office file with read_file, you will get binary garbage or an error.
                 """.formatted(entity.getId());
 
-        String searchGuidance = "";
-        if (builtinSearchEnabled) {
-            searchGuidance = """
+        // Web-search vs browser_use priority guidance — emitted unconditionally so the rule
+        // also reaches OpenAI-compatible / Anthropic / Gemini / DeepSeek / Ollama agents that
+        // do not have builtin search. Issue #40: without this rule the model treats
+        // browser_use as a search tool and gets stuck in a Playwright launch loop on Windows.
+        String searchGuidance = """
 
                 ## Web Search Capability
 
-                You have **dual search capability**:
-                1. **Built-in search** (preferred): Your responses automatically incorporate live web search results from the model provider. For most queries, answer directly — your response already includes real-time search data.
-                2. **search tool** (supplementary): Available as a fallback. Supports advanced parameters: `freshness` (day/week/month/year), `language` (zh-CN/en), `count` (1-10).
-
-                ### Priority Rules
-                - **Default**: Answer directly using built-in search. Do NOT say you cannot search — your replies already include live results.
-                - **Use search tool** ONLY when: you need precise time filtering (e.g., user asks for "yesterday's news" → call search with freshness=day), specific language results, or your built-in results feel insufficient.
-                - **NEVER** call both browser_use and search tool for the same query.
+                ### Tool Priority
+                - For plain web search or fetching public page content, call the `search` tool. It supports advanced parameters: `freshness` (day/week/month/year), `language` (zh-CN/en), `count` (1-10).
+                - Call `browser_use` ONLY when you need to interact with a page (click, fill forms, screenshot, run JS, follow a logged-in flow). Do NOT use `browser_use` as a search alternative.
+                - **NEVER** call both `browser_use` and `search` for the same query.
                 - When searching for news, use the standard format: `📰 [Category] Title — Source | Time + Summary`, up to 5 results per category.
+                """;
+        if (builtinSearchEnabled) {
+            searchGuidance += """
+
+                ### Built-in Search (preferred when available)
+                Your responses automatically incorporate live web search results from the model provider. For most queries, answer directly — your reply already includes real-time search data. Do NOT say you cannot search.
+                Use the `search` tool ONLY when you need precise time filtering (e.g., "yesterday's news" → freshness=day), a specific language, or when built-in results feel insufficient.
                 """;
         }
 
@@ -1004,6 +1095,16 @@ public class AgentGraphBuilder {
 
     /** Transitional public visibility for {@code chatmodel} sub-package builders; will move into the builder in PR-0b. */
     public OpenAiApi buildOpenAiApi(ModelProviderEntity provider) {
+        return buildOpenAiApi(provider, null);
+    }
+
+    /**
+     * Overload that accepts a per-model read-timeout override (seconds).
+     * Threaded into both the sync RestClient and streaming WebClient so
+     * timeout behavior is consistent across blocking and streaming chat
+     * completions. Null falls back to the default 180s.
+     */
+    public OpenAiApi buildOpenAiApi(ModelProviderEntity provider, Integer readTimeoutOverride) {
         if (provider == null || !modelProviderService.isProviderConfigured(provider.getProviderId())) {
             throw new MateClawException("err.agent.provider_not_configured", "Provider 未完成配置，请在模型设置中填写有效的 API Key 和 Base URL");
         }
@@ -1025,8 +1126,9 @@ public class AgentGraphBuilder {
         MultiValueMap<String, String> headers = buildOpenAiHeaders(kwargs);
         String completionsPath = resolveOpenAiCompletionsPath(baseUrl, kwargs);
         RestClient.Builder restClientBuilder = applyHttpTimeouts(
-                restClientBuilderProvider.getIfAvailable(RestClient::builder));
-        WebClient.Builder webClientBuilder = webClientBuilderProvider.getIfAvailable(WebClient::builder);
+                restClientBuilderProvider.getIfAvailable(RestClient::builder), readTimeoutOverride);
+        WebClient.Builder webClientBuilder = applyHttpTimeoutsToWebClient(
+                webClientBuilderProvider.getIfAvailable(WebClient::builder), readTimeoutOverride);
 
         // Spring AI OpenAiApi 构造函数会先 set User-Agent 为 "spring-ai"，再 addAll 我们的 headers，
         // 导致自定义 User-Agent 被追加而非覆盖。因此对需要伪装客户端身份的 provider（如 kimi-code），
@@ -1383,12 +1485,53 @@ public class AgentGraphBuilder {
      * readTimeout=180s（覆盖 nginx 60s 网关超时 + 留足真实长响应余量；超时后由上层 retry 接管）。
      */
     private RestClient.Builder applyHttpTimeouts(RestClient.Builder builder) {
+        return applyHttpTimeouts(builder, null);
+    }
+
+    /**
+     * Overload that accepts a per-model read-timeout override (seconds).
+     * Null falls back to the default 180s.
+     */
+    private RestClient.Builder applyHttpTimeouts(RestClient.Builder builder, Integer readTimeoutOverride) {
         HttpClient httpClient = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(10))
+                .connectTimeout(vip.mate.llm.chatmodel.HttpTimeouts.CONNECT_TIMEOUT)
                 .build();
         JdkClientHttpRequestFactory rf = new JdkClientHttpRequestFactory(httpClient);
-        rf.setReadTimeout(Duration.ofSeconds(180));
+        rf.setReadTimeout(vip.mate.llm.chatmodel.HttpTimeouts.resolveReadTimeout(readTimeoutOverride));
         return builder.requestFactory(rf);
+    }
+
+    /**
+     * Apply equivalent timeouts to the WebClient that backs OpenAI-compatible
+     * STREAMING calls (chat completions with {@code stream:true}). The
+     * RestClient version above only protects synchronous HTTP — without this,
+     * the streaming code path uses the default {@code WebClient} which has
+     * neither connect nor read timeout, so a stalled provider can hang the
+     * call forever (observed: a single volcengine-plan request held the agent
+     * thread for 9+ minutes with no error, until the user manually pressed
+     * Stop). That kept the failover chain idle because nothing threw.
+     * <p>
+     * Uses {@link JdkClientHttpConnector} with the same {@link HttpClient} we
+     * already use for the RestClient so the dependency surface stays clean
+     * (reactor-netty is not on this project's classpath — Spring's webflux
+     * starter is excluded by design).
+     */
+    private WebClient.Builder applyHttpTimeoutsToWebClient(WebClient.Builder builder) {
+        return applyHttpTimeoutsToWebClient(builder, null);
+    }
+
+    /**
+     * Overload with the same per-model override semantics as
+     * {@link #applyHttpTimeouts(RestClient.Builder, Integer)}.
+     */
+    private WebClient.Builder applyHttpTimeoutsToWebClient(WebClient.Builder builder, Integer readTimeoutOverride) {
+        HttpClient httpClient = HttpClient.newBuilder()
+                .connectTimeout(vip.mate.llm.chatmodel.HttpTimeouts.CONNECT_TIMEOUT)
+                .build();
+        org.springframework.http.client.reactive.JdkClientHttpConnector connector =
+                new org.springframework.http.client.reactive.JdkClientHttpConnector(httpClient);
+        connector.setReadTimeout(vip.mate.llm.chatmodel.HttpTimeouts.resolveReadTimeout(readTimeoutOverride));
+        return builder.clientConnector(connector);
     }
 
     /**
@@ -1408,17 +1551,28 @@ public class AgentGraphBuilder {
         return result;
     }
 
+    // Trailing "/v{digits}" segment in a base URL — the OpenAI-compatible convention
+    // (/v1 OpenAI, /v3 Volcano Ark, /v4 Zhipu). When the baseUrl already carries this
+    // segment, the default /v1 prefix on the path must be stripped to avoid building
+    // a broken URL like /api/v3/v1/chat/completions.
+    private static final java.util.regex.Pattern OPENAI_BASE_URL_VERSION_SUFFIX =
+            java.util.regex.Pattern.compile(".*/v\\d+$");
+
     private String resolveOpenAiCompletionsPath(String baseUrl, Map<String, Object> kwargs) {
         Object raw = kwargs.get("completionsPath");
-        String path = raw instanceof String value && StringUtils.hasText(value) ? value.trim() : "/v1/chat/completions";
+        boolean explicit = raw instanceof String value && StringUtils.hasText(value);
+        String path = explicit ? ((String) raw).trim() : "/v1/chat/completions";
         if (!path.startsWith("/")) {
             path = "/" + path;
         }
-        if (baseUrl.endsWith("/v1") && path.startsWith("/v1/")) {
+        // An explicit completionsPath is honored as-is. Otherwise, dedupe the /v1
+        // prefix when the baseUrl already ends with /v{N} (Volcano Engine Ark /v3,
+        // Zhipu /v4, etc.).
+        if (!explicit
+                && baseUrl != null
+                && OPENAI_BASE_URL_VERSION_SUFFIX.matcher(baseUrl).matches()
+                && path.startsWith("/v1/")) {
             path = path.substring(3);
-            if (!path.startsWith("/")) {
-                path = "/" + path;
-            }
         }
         return path;
     }
@@ -1510,8 +1664,14 @@ public class AgentGraphBuilder {
                 continue;
             }
 
-            // Cross-turn assistant: never patch (symmetric with stripThinkingFromPrompt)
-            if (i <= lastUserIdx) {
+            // Cross-turn assistant: usually skip per stripThinkingFromPrompt's
+            // "thinking resets across user turns" rule. But DeepSeek (since
+            // 2026-04) requires reasoning_content even on prior-turn assistants
+            // and rejects requests where any prior assistant has it null. For
+            // policies with patchCrossTurn=true, fall through and patch with
+            // the empty fallback (" ") so multi-turn conversations don't 400
+            // before sanitizeForLlm has a chance to filter the previous error.
+            if (i <= lastUserIdx && !policy.patchCrossTurn) {
                 patched.add(msg);
                 continue;
             }
@@ -1621,19 +1781,33 @@ public class AgentGraphBuilder {
         // tolerance KIMI/OPENAI use restores forward progress; the producer-side
         // capture gap remains a real bug to fix in RFC-049 PR-3 but doesn't
         // belong on the user-facing failure path.
-        DEEPSEEK(" ",  false, true),
-        KIMI    (" ",  false, false),
-        OPENAI  (" ",  false, false),
-        DEFAULT (" ",  false, false);
+        //
+        // 2026-04-29 follow-up: DeepSeek tightened thinking-mode validation to
+        // require reasoning_content on EVERY assistant message in the request,
+        // including prior-turn history. We never persist reasoning_content to
+        // mate_message, so any conversation with >=1 prior turn fails with
+        // 400 "reasoning_content must be passed back" on the very first reasoning
+        // call. patchCrossTurn=true lets us extend the " " fallback to prior-turn
+        // assistants too, restoring forward progress for multi-turn IM chats.
+        // Real reasoning_content recovery (RFC-049 PR-3) is the proper long-term
+        // fix; this keeps users unblocked.
+        DEEPSEEK(" ",  false, true,  true),
+        KIMI    (" ",  false, false, false),
+        OPENAI  (" ",  false, false, false),
+        DEFAULT (" ",  false, false, false);
 
         final String emptyFallback;
         final boolean warnOnMissingReal;
         final boolean patchNonToolCall;
+        /** Whether to also patch prior-turn assistants ({@code i <= lastUserIdx}). */
+        final boolean patchCrossTurn;
 
-        FallbackPolicy(String emptyFallback, boolean warnOnMissingReal, boolean patchNonToolCall) {
+        FallbackPolicy(String emptyFallback, boolean warnOnMissingReal,
+                       boolean patchNonToolCall, boolean patchCrossTurn) {
             this.emptyFallback = emptyFallback;
             this.warnOnMissingReal = warnOnMissingReal;
             this.patchNonToolCall = patchNonToolCall;
+            this.patchCrossTurn = patchCrossTurn;
         }
 
         static FallbackPolicy forProvider(ModelProviderEntity provider) {

@@ -23,6 +23,8 @@
                 <th>{{ t('cronJobs.columns.name') }}</th>
                 <th>{{ t('cronJobs.columns.cron') }}</th>
                 <th>{{ t('tokenUsage.date') }}</th>
+                <th>{{ t('cronJobs.columns.channel') }}</th>
+                <th>{{ t('cronJobs.columns.lastDelivery') }}</th>
                 <th>{{ t('cronJobs.columns.enabled') }}</th>
                 <th>{{ t('cronJobs.columns.actions') }}</th>
               </tr>
@@ -52,6 +54,23 @@
                     <span v-else class="time-empty">-</span>
                     <span v-if="job.lastRunTime" class="time-subtext" :title="`${t('cronJobs.columns.lastRun')}: ${formatTime(job.lastRunTime)}`">{{ t('cronJobs.columns.lastRun') }}: {{ formatTime(job.lastRunTime) }}</span>
                   </div>
+                </td>
+                <td>
+                  <!-- Channel binding visibility — RFC-063r post-deploy fix.
+                       Cron created from web (no channelId) shows "—". -->
+                  <span v-if="job.channelId" class="channel-binding"
+                        :title="job.deliveryConfig?.targetId ? t('cronJobs.columns.targetId') + ': ' + job.deliveryConfig.targetId : ''">
+                    {{ job.channelName || ('#' + job.channelId) }}
+                  </span>
+                  <span v-else class="time-empty">—</span>
+                </td>
+                <td>
+                  <!-- RFC-063r §2.14: most-recent delivery status badge.
+                       hover surfaces the error detail when not delivered. -->
+                  <span class="delivery-badge" :class="'delivery-' + (job.lastDeliveryStatus || 'NONE').toLowerCase()"
+                        :title="job.lastDeliveryError || t('cronJobs.lastDelivery.' + (job.lastDeliveryStatus || 'NONE').toLowerCase())">
+                    {{ t('cronJobs.lastDelivery.' + (job.lastDeliveryStatus || 'NONE').toLowerCase()) }}
+                  </span>
                 </td>
                 <td>
                   <label class="toggle-switch">
@@ -87,7 +106,7 @@
                 </td>
               </tr>
               <tr v-if="store.jobs.length === 0">
-                <td colspan="5" class="empty-row">
+                <td colspan="7" class="empty-row">
                   <div class="empty-state">
                     <span class="empty-icon">&#9201;</span>
                     <p>{{ t('cronJobs.noJobs') }}</p>
@@ -137,8 +156,32 @@
             <div class="detail-label">{{ t('cronJobs.columns.lastRun') }}</div>
             <div class="detail-value">{{ detailJob.lastRunTime ? formatTime(detailJob.lastRunTime) : '-' }}</div>
           </div>
+          <!-- RFC-063r post-deploy: channel binding visibility in detail page -->
+          <div class="detail-item" v-if="detailJob.channelId">
+            <div class="detail-label">{{ t('cronJobs.columns.channel') }}</div>
+            <div class="detail-value">{{ detailJob.channelName || ('#' + detailJob.channelId) }}</div>
+          </div>
+          <div class="detail-item" v-if="detailJob.deliveryConfig?.targetId">
+            <div class="detail-label">{{ t('cronJobs.columns.targetId') }}</div>
+            <div class="detail-value mono">{{ detailJob.deliveryConfig.targetId }}</div>
+          </div>
+          <div class="detail-item" v-if="detailJob.lastDeliveryStatus && detailJob.lastDeliveryStatus !== 'NONE'">
+            <div class="detail-label">{{ t('cronJobs.columns.lastDelivery') }}</div>
+            <div class="detail-value">
+              <span class="delivery-badge" :class="'delivery-' + detailJob.lastDeliveryStatus.toLowerCase()">
+                {{ t('cronJobs.lastDelivery.' + detailJob.lastDeliveryStatus.toLowerCase()) }}
+              </span>
+              <div v-if="detailJob.lastDeliveryError" class="detail-subvalue" style="color: rgb(239,68,68);">
+                {{ detailJob.lastDeliveryError }}
+              </div>
+            </div>
+          </div>
           <div class="detail-item detail-item-full" v-if="detailJob.taskType === 'text'">
             <div class="detail-label">{{ t('cronJobs.fields.triggerMessage') }}</div>
+            <div class="detail-value detail-block">{{ detailJob.triggerMessage || '-' }}</div>
+          </div>
+          <div class="detail-item detail-item-full" v-else-if="detailJob.taskType === 'reminder'">
+            <div class="detail-label">{{ t('cronJobs.fields.reminderText') }}</div>
             <div class="detail-value detail-block">{{ detailJob.triggerMessage || '-' }}</div>
           </div>
           <div class="detail-item detail-item-full" v-else>
@@ -181,6 +224,10 @@
                 <input type="radio" v-model="form.taskType" value="text" />
                 {{ t('cronJobs.taskTypes.text') }}
               </label>
+              <label class="radio-option" :class="{ active: form.taskType === 'reminder' }">
+                <input type="radio" v-model="form.taskType" value="reminder" />
+                {{ t('cronJobs.taskTypes.reminder') }}
+              </label>
               <label class="radio-option" :class="{ active: form.taskType === 'agent' }">
                 <input type="radio" v-model="form.taskType" value="agent" />
                 {{ t('cronJobs.taskTypes.agent') }}
@@ -192,6 +239,11 @@
             <label class="form-label">{{ t('cronJobs.fields.triggerMessage') }} *</label>
             <textarea v-model="form.triggerMessage" class="form-textarea" rows="3"
               :placeholder="t('cronJobs.fields.triggerMessagePlaceholder')"></textarea>
+          </div>
+          <div v-else-if="form.taskType === 'reminder'" class="form-group">
+            <label class="form-label">{{ t('cronJobs.fields.reminderText') }} *</label>
+            <textarea v-model="form.triggerMessage" class="form-textarea" rows="3"
+              :placeholder="t('cronJobs.fields.reminderTextPlaceholder')"></textarea>
           </div>
           <div v-else class="form-group">
             <label class="form-label">{{ t('cronJobs.fields.requestBody') }} *</label>
@@ -263,7 +315,8 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
+import { mcConfirm } from '@/components/common/useConfirm'
 import { useCronJobStore } from '@/stores/useCronJobStore'
 import { useAgentStore } from '@/stores/useAgentStore'
 import type { CronJob } from '@/types/index'
@@ -305,6 +358,7 @@ const form = ref<any>(defaultForm())
 const canSave = computed(() => {
   if (!form.value.name || !form.value.agentId) return false
   if (form.value.taskType === 'text' && !form.value.triggerMessage) return false
+  if (form.value.taskType === 'reminder' && !form.value.triggerMessage) return false
   if (form.value.taskType === 'agent' && !form.value.requestBody) return false
   if (cronType.value === 'custom' && !form.value.cronExpression?.trim()) return false
   return true
@@ -385,12 +439,12 @@ async function saveJob() {
 }
 
 async function handleDelete(job: CronJob) {
-  try {
-    await ElMessageBox.confirm(
-      t('cronJobs.messages.deleteConfirm', { name: job.name }),
-      { type: 'warning' },
-    )
-  } catch { return }
+  const ok = await mcConfirm({
+    title: t('common.delete'),
+    message: t('cronJobs.messages.deleteConfirm', { name: job.name }),
+    tone: 'danger',
+  })
+  if (!ok) return
   try {
     await store.deleteJob(job.id)
     ElMessage.success(t('cronJobs.messages.deleteSuccess'))
@@ -629,6 +683,7 @@ function formatTime(datetime: string | undefined): string {
 }
 .type-badge { display: inline-flex; align-items: center; padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; }
 .type-text { background: var(--mc-primary-bg); color: var(--mc-primary); }
+.type-reminder { background: var(--mc-warning-bg, var(--mc-primary-bg)); color: var(--mc-warning, var(--mc-primary-hover)); }
 .type-agent { background: var(--mc-success-bg, var(--mc-primary-bg)); color: var(--mc-success, var(--mc-primary-hover)); }
 .cron-code { display: inline-flex; background: var(--mc-bg-sunken); padding: 4px 8px; border-radius: 8px; font-size: 12px; color: var(--mc-text-primary); font-family: monospace; }
 .cron-readable { font-size: 12px; line-height: 1.45; color: var(--mc-text-tertiary); margin-top: 6px; }
@@ -652,6 +707,34 @@ function formatTime(datetime: string | undefined): string {
   color: var(--mc-text-tertiary);
 }
 .time-empty { color: var(--mc-text-tertiary); }
+
+/* RFC-063r §2.14: delivery-status badge — neutral / blue / green / red. */
+.delivery-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.delivery-none { background: var(--mc-bg-sunken); color: var(--mc-text-tertiary); }
+.delivery-pending { background: rgba(59, 130, 246, 0.12); color: rgb(59, 130, 246); }
+.delivery-delivered { background: rgba(34, 197, 94, 0.12); color: rgb(34, 197, 94); }
+.delivery-not_delivered { background: rgba(239, 68, 68, 0.12); color: rgb(239, 68, 68); }
+
+/* Channel binding pill — surfaces which IM channel a cron is bound to. */
+.channel-binding {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  background: var(--mc-primary-bg);
+  color: var(--mc-primary);
+  white-space: nowrap;
+}
 
 .toggle-switch { position: relative; display: inline-block; width: 36px; height: 20px; cursor: pointer; }
 .toggle-switch input { opacity: 0; width: 0; height: 0; }

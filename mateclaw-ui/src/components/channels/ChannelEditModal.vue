@@ -42,7 +42,7 @@
             <select v-model="form.agentId" class="form-input">
               <option :value="null">{{ t('channels.placeholders.selectAgent') }}</option>
               <option v-for="agent in agents" :key="agent.id" :value="agent.id">
-                {{ agent.icon || '🤖' }} {{ agent.name }}
+                {{ plainTextIcon(agent.icon) }} {{ agent.name }}
               </option>
             </select>
           </div>
@@ -440,6 +440,7 @@ import { useWeixinQrcodePoll } from '@/composables/channels/useWeixinQrcodePoll'
 import { useWecomBotAuth } from '@/composables/channels/useWecomBotAuth'
 import { useFeishuAppRegister } from '@/composables/channels/useFeishuAppRegister'
 import { useDingTalkAppRegister } from '@/composables/channels/useDingTalkAppRegister'
+import { plainTextIcon } from '@/composables/usePixelarticons'
 
 interface Props {
   modelValue: boolean
@@ -503,11 +504,13 @@ const weixin = useWeixinQrcodePoll(({ botToken, baseUrl }) => {
       form.value.name = t('channels.weixin.newAccountName') + ' (' + suffix + ')'
     }
   }
+  form.value.enabled = true
 })
 
 const wecom = useWecomBotAuth((bot) => {
   channelConfig.value.bot_id = bot.botid
   channelConfig.value.secret = bot.secret
+  form.value.enabled = true
 })
 
 // Feishu one-click app registration: scan-to-create flow that returns
@@ -515,6 +518,10 @@ const wecom = useWecomBotAuth((bot) => {
 const feishuRegister = useFeishuAppRegister(({ appId, appSecret }) => {
   channelConfig.value.app_id = appId
   channelConfig.value.app_secret = appSecret
+  // Auto-enable on confirmed scan: skipping this trapped users into thinking
+  // the channel was ready to go after scanning, when in fact the toggle was
+  // still off and the adapter never started.
+  form.value.enabled = true
 })
 
 // DingTalk one-click app registration via Device Flow — same UX shape as
@@ -522,6 +529,7 @@ const feishuRegister = useFeishuAppRegister(({ appId, appSecret }) => {
 const dingtalkRegister = useDingTalkAppRegister(({ clientId, clientSecret }) => {
   channelConfig.value.client_id = clientId
   channelConfig.value.client_secret = clientSecret
+  form.value.enabled = true
 })
 
 // ========== Field defs (derived) ==========
@@ -662,6 +670,59 @@ function initForCreate() {
   configTab.value = 'form'
   showAdvanced.value = false
   initDefaultFieldValues()
+  // Pre-fill description with the i18n type-level fallback so the new
+  // channel card never lands on the list page with an empty middle area.
+  // The user can keep, edit, or clear it before saving.
+  applyTypeDescriptionFallback(true)
+}
+
+/**
+ * Set {@code form.description} to the type-level i18n fallback when
+ * appropriate. Called on mount and whenever {@code channelType} changes
+ * (create flow only — never overrides an editing row).
+ *
+ * @param force when {@code true}, overwrite an empty / auto-filled
+ *              description regardless. We treat ANY description that
+ *              matches one of the known type fallbacks as "auto", so
+ *              switching from dingtalk → wecom in the wizard updates
+ *              the placeholder cleanly. A description the user typed
+ *              themselves never matches and is preserved.
+ */
+function applyTypeDescriptionFallback(force = false) {
+  if (props.editingChannel) return  // never touch user data on edit
+  const type = form.value.channelType
+  if (!type) return
+  const candidate = t(`channels.cardDesc.typeFallback.${type}` as any)
+  // vue-i18n returns the key itself when missing → leave description alone.
+  const haveTranslation = candidate && candidate !== `channels.cardDesc.typeFallback.${type}`
+  if (!haveTranslation) return
+  const current = (form.value.description || '').trim()
+  if (force && !current) {
+    form.value.description = candidate
+    return
+  }
+  // Switching channel types — update only if the description is still one
+  // of the auto-filled fallbacks (user hasn't typed their own).
+  if (current && isAutoTypeFallback(current)) {
+    form.value.description = candidate
+  } else if (!current) {
+    form.value.description = candidate
+  }
+}
+
+/** True when the given string equals any of the known channel-type
+ *  fallback i18n strings — used to detect "user hasn't customized this". */
+function isAutoTypeFallback(text: string): boolean {
+  const trimmed = text.trim()
+  // Iterate the known channel types we ship i18n for. List mirrors
+  // CHANNEL_TYPE_OPTIONS but we keep a local copy to avoid coupling.
+  const known = ['web', 'dingtalk', 'wecom', 'weixin', 'feishu', 'telegram',
+                 'slack', 'discord', 'qq', 'matrix', 'qqbot', 'yuanbao']
+  for (const k of known) {
+    const s = t(`channels.cardDesc.typeFallback.${k}` as any)
+    if (s && s === trimmed) return true
+  }
+  return false
 }
 
 function initDefaultFieldValues() {
@@ -685,6 +746,8 @@ function onChannelTypeChange() {
   visibleFields.value = {}
   weixin.reset()
   initDefaultFieldValues()
+  // Refresh the auto-filled description if the user hasn't customized it.
+  applyTypeDescriptionFallback(false)
 }
 
 function switchTab(tab: 'form' | 'json') {

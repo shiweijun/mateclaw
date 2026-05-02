@@ -4,10 +4,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
+import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.ai.tool.ToolCallback;
 import vip.mate.tool.builtin.ToolExecutionContext;
 import vip.mate.agent.AgentToolSet;
 import vip.mate.agent.GraphEventPublisher;
+import vip.mate.agent.context.ChatOrigin;
 import vip.mate.agent.graph.state.DirectToolOutput;
 import vip.mate.approval.ApprovalWorkflowService;
 import vip.mate.channel.web.ChatStreamTracker;
@@ -21,6 +23,7 @@ import vip.mate.tool.guard.service.ToolGuardService;
 import java.util.*;
 import java.util.Collections;
 import java.util.concurrent.*;
+import java.util.regex.Pattern;
 
 /**
  * 统一工具执行器（共享于 ActionNode 和 StepExecutionNode）
@@ -53,6 +56,23 @@ public class ToolExecutionExecutor {
      * method with {@link vip.mate.tool.ConcurrencyUnsafe} instead of editing
      * this list.
      */
+    /**
+     * Defense against runaway single-response tool floods.
+     *
+     * <p>Some models (StreamLake's kat-coder-pro-v1 has been observed
+     * emitting 50+ in one shot) return huge {@code tool_calls}
+     * batches in a single response. Without a cap, every call executes, which
+     * can saturate downstream provider QPS, multiply approval rows, and burn
+     * tokens. The cap is independent of {@code MAX_ITERATIONS} (which limits
+     * the loop count, not the per-response batch).
+     *
+     * <p>16 covers virtually every legitimate parallel-search / batch-edit
+     * scenario; truncated calls receive a synthetic {@link ToolResponseMessage}
+     * in the same turn so the LLM can re-issue the most-important ones in
+     * its next response rather than hanging on missing tool replies.
+     */
+    static final int MAX_TOOL_CALLS_PER_RESPONSE = 16;
+
     private static final Set<String> DEFAULT_UNSAFE_TOOLS = Set.of(
             "browser_use", "BrowserUseTool", "write_file", "edit_file"
     );
@@ -112,6 +132,16 @@ public class ToolExecutionExecutor {
     }
 
     private final Map<String, ToolCallback> toolCallbackMap;
+    /**
+     * Maps a normalized tool name (lowercase snake_case, with `_tool`/`_function`
+     * suffixes stripped) to the canonical name registered in {@link #toolCallbackMap}.
+     * Lets us resolve names the LLM sometimes mangles (e.g. {@code WebSearch},
+     * {@code web_search_tool}, {@code Read_File}) back to the registered tool
+     * before guard / lookup / event reporting run, so guard rules keyed on the
+     * canonical name aren't silently bypassed.
+     */
+    private final Map<String, String> normalizedNameLookup;
+    private static final Pattern CAMEL_BOUNDARY = Pattern.compile("([a-z0-9])([A-Z])");
     private final ToolGuardService toolGuardService;
     private final ToolGuard toolGuard; // legacy fallback
     private final ApprovalWorkflowService approvalService;
@@ -121,6 +151,18 @@ public class ToolExecutionExecutor {
     private final ToolResultStorage resultStorage;
     /** RFC-008 Phase 4 metadata-driven concurrency classifier; nullable for legacy constructors. */
     private final vip.mate.tool.ToolConcurrencyRegistry concurrencyRegistry;
+    /**
+     * Issue #46: when {@code toolCallbackMap} misses a name that the LLM
+     * called, we check whether it matches an active skill so we can
+     * return a precise hint instead of bare "Tool not found". Nullable —
+     * legacy constructors and tests may leave this unset, in which case
+     * the safety net falls through to the original error string.
+     */
+    private vip.mate.skill.runtime.SkillRuntimeService skillRuntimeService;
+
+    public void setSkillRuntimeService(vip.mate.skill.runtime.SkillRuntimeService s) {
+        this.skillRuntimeService = s;
+    }
 
     public ToolExecutionExecutor(AgentToolSet toolSet, ToolGuardService toolGuardService,
                                   ApprovalWorkflowService approvalService, ChatStreamTracker streamTracker) {
@@ -151,6 +193,7 @@ public class ToolExecutionExecutor {
     public ToolExecutionExecutor(AgentToolSet toolSet, ToolGuard toolGuard,
                                   ApprovalWorkflowService approvalService, ChatStreamTracker streamTracker) {
         this.toolCallbackMap = toolSet.callbackByName();
+        this.normalizedNameLookup = buildNormalizedLookup(this.toolCallbackMap.keySet());
         this.toolGuardService = null;
         this.toolGuard = toolGuard;
         this.approvalService = approvalService;
@@ -167,6 +210,7 @@ public class ToolExecutionExecutor {
                                    ToolResultStorage resultStorage,
                                    vip.mate.tool.ToolConcurrencyRegistry concurrencyRegistry) {
         this.toolCallbackMap = toolSet.callbackByName();
+        this.normalizedNameLookup = buildNormalizedLookup(this.toolCallbackMap.keySet());
         this.toolGuardService = toolGuardService;
         this.toolGuard = toolGuard;
         this.approvalService = approvalService;
@@ -198,11 +242,6 @@ public class ToolExecutionExecutor {
         return execute(toolCalls, conversationId, agentId, isReplay, "");
     }
 
-    /** 当前执行的 requesterId，传递给 ToolExecutionContext */
-    private volatile String currentRequesterId;
-    /** 当前工作区活动目录（为空不限制），传递给 ToolExecutionContext */
-    private volatile String currentWorkspaceBasePath;
-
     public ToolExecutionResult execute(List<AssistantMessage.ToolCall> toolCalls,
                                         String conversationId, String agentId,
                                         boolean isReplay, String requesterId) {
@@ -213,23 +252,73 @@ public class ToolExecutionExecutor {
                                         String conversationId, String agentId,
                                         boolean isReplay, String requesterId,
                                         String workspaceBasePath) {
-        this.currentRequesterId = requesterId;
-        this.currentWorkspaceBasePath = workspaceBasePath;
+        return execute(toolCalls, conversationId, agentId, isReplay, requesterId,
+                workspaceBasePath, ChatOrigin.EMPTY);
+    }
+
+    /**
+     * RFC-063r §2.5: preferred overload — accepts a {@link ChatOrigin} that the
+     * top-level agent has enriched with agentId/workspace/channel context.
+     * Builds a Spring AI {@link ToolContext} per tool invocation so
+     * {@code @Tool} methods can read the origin via
+     * {@code ChatOrigin.from(toolContext)}.
+     *
+     * <p>During the PR-1 transition the legacy {@link ToolExecutionContext}
+     * ThreadLocal is also populated, so existing tools that read from it keep
+     * working unchanged. After all 8 callsites migrate, the ThreadLocal can be
+     * removed.
+     *
+     * <p><b>Thread safety</b>: this executor instance is shared across all
+     * concurrent invocations of a single agent (one executor per agent, per
+     * {@code AgentGraphBuilder.build}). Origin / requester / workspace are
+     * therefore <em>method-local</em> — they live as parameters all the way
+     * down into {@link PreparedToolCall} and never touch instance state. An
+     * earlier draft used {@code volatile} fields here; concurrent users hitting
+     * the same agent (Web + IM at once) raced on those fields and the channel
+     * binding was occasionally cross-contaminated. Do not reintroduce the
+     * fields — pass via parameters.
+     */
+    public ToolExecutionResult execute(List<AssistantMessage.ToolCall> toolCalls,
+                                        String conversationId, String agentId,
+                                        boolean isReplay, String requesterId,
+                                        String workspaceBasePath,
+                                        ChatOrigin origin) {
+        ChatOrigin safeOrigin = origin != null ? origin : ChatOrigin.EMPTY;
         List<ToolResponseMessage.ToolResponse> allResponses = new ArrayList<>();
         List<GraphEventPublisher.GraphEvent> events = Collections.synchronizedList(new ArrayList<>());
         // RFC-052: accumulate full-text outputs from returnDirect tools so the
         // graph can route to FinalAnswerNode without re-entering the LLM.
         List<DirectToolOutput> directOutputs = Collections.synchronizedList(new ArrayList<>());
 
-        events.add(GraphEventPublisher.phase("action", Map.of("toolCount", toolCalls.size())));
+        // RFC-03 Lane A2 — cap per-response tool_calls before doing any other
+        // work. Truncated calls get synthetic responses appended right away so
+        // the LLM sees the cap on its next turn instead of hanging on missing
+        // ToolResponseMessages. See MAX_TOOL_CALLS_PER_RESPONSE javadoc.
+        CappedToolCalls capped = capToolCalls(toolCalls, MAX_TOOL_CALLS_PER_RESPONSE);
+        if (capped.wasTruncated) {
+            int requested = toolCalls.size();
+            log.warn("[ToolExecutor] Model returned {} tool_calls in one response; truncating to {} — see RFC-03 A2",
+                    requested, MAX_TOOL_CALLS_PER_RESPONSE);
+            events.add(GraphEventPublisher.phase("toolflood", Map.of(
+                    "requested", requested,
+                    "executed", MAX_TOOL_CALLS_PER_RESPONSE,
+                    "dropped", requested - MAX_TOOL_CALLS_PER_RESPONSE)));
+            allResponses.addAll(capped.truncatedResponses);
+        }
+        List<AssistantMessage.ToolCall> effectiveCalls = capped.effective;
+
+        events.add(GraphEventPublisher.phase("action", Map.of("toolCount", effectiveCalls.size())));
 
         // ═══ Phase 1: 顺序 Guard + 分段 ═══
         List<PreparedToolCall> preparedCalls = new ArrayList<>();
         ApprovalBarrier barrier = null;
 
-        for (int i = 0; i < toolCalls.size(); i++) {
-            AssistantMessage.ToolCall toolCall = toolCalls.get(i);
-            String toolName = toolCall.name();
+        for (int i = 0; i < effectiveCalls.size(); i++) {
+            AssistantMessage.ToolCall toolCall = effectiveCalls.get(i);
+            // Resolve LLM-emitted name to canonical BEFORE guard / lookup so a
+            // mangled name (Read_File, web_search_tool, BrowserUseTool) can't
+            // bypass guard rules keyed on the canonical name.
+            String toolName = resolveToolName(toolCall.name());
             String arguments = toolCall.arguments();
 
             events.add(GraphEventPublisher.toolStart(toolCall.id(), toolName, arguments));
@@ -277,8 +366,8 @@ public class ToolExecutionExecutor {
                     allResponses.add(new ToolResponseMessage.ToolResponse(
                             toolCall.id(), toolName, decision.response));
                     // 标记后续工具为等待审批
-                    for (int j = i + 1; j < toolCalls.size(); j++) {
-                        AssistantMessage.ToolCall remaining = toolCalls.get(j);
+                    for (int j = i + 1; j < effectiveCalls.size(); j++) {
+                        AssistantMessage.ToolCall remaining = effectiveCalls.get(j);
                         allResponses.add(new ToolResponseMessage.ToolResponse(
                                 remaining.id(), remaining.name(),
                                 "[⏳ 等待审批] 前序工具等待审批中，本工具暂缓执行。"));
@@ -299,17 +388,18 @@ public class ToolExecutionExecutor {
             }
             ToolCallback callback = toolCallbackMap.get(toolName);
             if (callback == null) {
-                log.warn("[ToolExecutor] Tool not found: {}", toolName);
-                events.add(GraphEventPublisher.toolComplete(toolCall.id(), toolName, "Tool not found: " + toolName, false));
+                String msg = skillAwareNotFoundMessage(toolName);
+                log.warn("[ToolExecutor] {}", msg);
+                events.add(GraphEventPublisher.toolComplete(toolCall.id(), toolName, msg, false));
                 allResponses.add(new ToolResponseMessage.ToolResponse(
-                        toolCall.id(), toolName, "Tool not found: " + toolName));
+                        toolCall.id(), toolName, msg));
                 continue;
             }
 
             // 4. 分类: concurrencySafe
             boolean safe = isConcurrencySafe(toolName);
             preparedCalls.add(new PreparedToolCall(toolCall, callback, arguments, safe, allResponses.size(),
-                    conversationId, currentRequesterId, currentWorkspaceBasePath));
+                    conversationId, requesterId, workspaceBasePath, safeOrigin));
             // 占位，Phase 2 填充
             allResponses.add(null);
         }
@@ -327,7 +417,7 @@ public class ToolExecutionExecutor {
         // response in turn until the cumulative size fits the budget.
         if (resultStorage != null && !allResponses.isEmpty()) {
             allResponses = new ArrayList<>(resultStorage.enforceTurnBudget(
-                    allResponses, conversationId, currentWorkspaceBasePath));
+                    allResponses, conversationId, workspaceBasePath));
         }
 
         boolean hasApprovalPending = barrier != null;
@@ -370,19 +460,28 @@ public class ToolExecutionExecutor {
             List<GraphEventPublisher.GraphEvent> events,
             String conversationId, String workspaceBasePath,
             List<DirectToolOutput> directOutputs) {
-        String toolName = toolCall.name();
+        String toolName = resolveToolName(toolCall.name());
         String callArguments = storedArguments != null ? storedArguments : toolCall.arguments();
 
         ToolCallback callback = toolCallbackMap.get(toolName);
         if (callback == null) {
-            log.warn("[ToolExecutor] Pre-approved tool not found: {}", toolName);
-            events.add(GraphEventPublisher.toolComplete(toolCall.id(), toolName, "Tool not found: " + toolName, false));
-            return new ToolResponseMessage.ToolResponse(toolCall.id(), toolName, "Tool not found: " + toolName);
+            String msg = skillAwareNotFoundMessage(toolName);
+            log.warn("[ToolExecutor] Pre-approved {}", msg);
+            events.add(GraphEventPublisher.toolComplete(toolCall.id(), toolName, msg, false));
+            return new ToolResponseMessage.ToolResponse(toolCall.id(), toolName, msg);
         }
 
         try {
             log.info("[ToolExecutor] Executing pre-approved tool: {}", toolName);
-            String result = callback.call(callArguments);
+            // RFC-063r §2.5: forward ToolContext so the pre-approved tool can
+            // still observe the originating ChatOrigin (channel/workspace).
+            // Origin is method-local (see thread-safety note on execute());
+            // the legacy ThreadLocal that used to carry it across executePreApproved
+            // calls was a cross-conversation footgun and has been removed.
+            ChatOrigin replayOrigin = ChatOrigin.EMPTY
+                    .withConversationId(conversationId)
+                    .withWorkspace(null, workspaceBasePath);
+            String result = callback.call(callArguments, replayOrigin.toToolContext());
             int rawLen = result != null ? result.length() : 0;
 
             // RFC-052: pre-approved tool may itself be returnDirect — in that
@@ -439,7 +538,10 @@ public class ToolExecutionExecutor {
     public ToolResponseMessage.ToolResponse executePreApproved(
             AssistantMessage.ToolCall toolCall, String storedArguments,
             List<GraphEventPublisher.GraphEvent> events) {
-        return executePreApproved(toolCall, storedArguments, events, null, currentWorkspaceBasePath);
+        // Workspace base path is no longer carried as instance state — legacy
+        // callers that don't supply one get unrestricted file access (matches
+        // pre-RFC behavior when WorkspacePathGuard.basePath was null).
+        return executePreApproved(toolCall, storedArguments, events, null, null);
     }
 
     // ==================== Phase 2: 并发执行 ====================
@@ -565,11 +667,19 @@ public class ToolExecutionExecutor {
                     toolName, pc.arguments != null && pc.arguments.length() > 200
                             ? pc.arguments.substring(0, 200) + "..." : pc.arguments);
 
-            // 注入工具执行上下文（供 VideoGenerateTool 等获取 conversationId / username / workspaceBasePath）
+            // RFC-063r §2.5 / PR-1 transition window: populate BOTH the explicit
+            // Spring AI ToolContext (preferred — read via ChatOrigin.from(ctx))
+            // AND the legacy ToolExecutionContext ThreadLocal so tools that have
+            // not yet migrated to ToolContext keep working unchanged.
             ToolExecutionContext.set(pc.conversationId, pc.requesterId, pc.workspaceBasePath);
             String result;
             try {
-                result = pc.callback.call(pc.arguments);
+                ChatOrigin runtimeOrigin = pc.origin != null ? pc.origin : ChatOrigin.EMPTY;
+                runtimeOrigin = runtimeOrigin
+                        .withConversationId(pc.conversationId)
+                        .withWorkspace(runtimeOrigin.workspaceId(), pc.workspaceBasePath);
+                ToolContext toolContext = runtimeOrigin.toToolContext();
+                result = pc.callback.call(pc.arguments, toolContext);
             } finally {
                 ToolExecutionContext.clear();
             }
@@ -771,6 +881,96 @@ public class ToolExecutionExecutor {
         return approvalResponse;
     }
 
+    /**
+     * Issue #46 — when a tool callback miss happens, check whether the
+     * unrecognized name actually matches an active skill. If it does, return
+     * a precise hint telling the LLM the right invocation pattern instead
+     * of bare "Tool not found: X". Without this, an LLM that called e.g.
+     * {@code RedisOps} as a tool gets no recovery signal and either gives
+     * up or falls back to shell guessing.
+     *
+     * <p>Case-insensitive match because LLMs sometimes change the case of
+     * skill names mid-conversation.
+     */
+    /**
+     * Resolve the LLM-emitted tool name to a registered canonical name.
+     * Tries exact match first (the hot path); on miss, normalizes the input
+     * (camelCase→snake_case, lowercase, strip {@code _tool}/{@code _function}
+     * suffix) and looks up the canonical equivalent. Returns the original
+     * string when no match is found, so the caller's downstream "tool not
+     * found" path still fires.
+     */
+    String resolveToolName(String requested) {
+        if (requested == null || requested.isBlank()) {
+            return requested;
+        }
+        if (toolCallbackMap.containsKey(requested)) {
+            return requested;
+        }
+        String normalized = normalizeToolName(requested);
+        String canonical = normalizedNameLookup.get(normalized);
+        if (canonical != null) {
+            log.info("[ToolExecutor] Tool name normalized: '{}' -> '{}' (via '{}')",
+                    requested, canonical, normalized);
+            return canonical;
+        }
+        return requested;
+    }
+
+    static String normalizeToolName(String name) {
+        if (name == null || name.isBlank()) {
+            return "";
+        }
+        String snake = CAMEL_BOUNDARY.matcher(name).replaceAll("$1_$2");
+        String collapsed = snake.toLowerCase(Locale.ROOT)
+                .replaceAll("[\\s\\-.]+", "_")
+                .replaceAll("_+", "_");
+        if (collapsed.endsWith("_tool")) {
+            collapsed = collapsed.substring(0, collapsed.length() - 5);
+        } else if (collapsed.endsWith("_function")) {
+            collapsed = collapsed.substring(0, collapsed.length() - 9);
+        }
+        return collapsed.replaceAll("^_+|_+$", "");
+    }
+
+    private static Map<String, String> buildNormalizedLookup(Set<String> canonicalNames) {
+        Map<String, String> result = new HashMap<>(canonicalNames.size() * 2);
+        for (String name : canonicalNames) {
+            String norm = normalizeToolName(name);
+            if (norm.isEmpty()) {
+                continue;
+            }
+            String previous = result.putIfAbsent(norm, name);
+            if (previous != null && !previous.equals(name)) {
+                log.warn("[ToolExecutor] Two registered tools normalize to the same key '{}': "
+                        + "'{}' and '{}' — only '{}' will resolve from mangled LLM emissions",
+                        norm, previous, name, previous);
+            }
+        }
+        return Map.copyOf(result);
+    }
+
+    private String skillAwareNotFoundMessage(String toolName) {
+        if (skillRuntimeService != null && toolName != null && !toolName.isBlank()) {
+            try {
+                boolean isSkill = skillRuntimeService.getActiveSkills().stream()
+                        .anyMatch(s -> s.getName() != null && s.getName().equalsIgnoreCase(toolName));
+                if (isSkill) {
+                    return String.format(
+                            "'%s' is a Skill, not a Tool — calling it as a tool fails. "
+                            + "To use it, FIRST call readSkillFile(skillName=\"%s\", filePath=\"SKILL.md\") "
+                            + "to read its instructions, THEN follow what SKILL.md tells you "
+                            + "(typically runSkillScript with a scripts/<file> path).",
+                            toolName, toolName);
+                }
+            } catch (Exception e) {
+                // Don't let a hint-side failure mask the original error.
+                log.debug("[ToolExecutor] skill-aware hint check failed: {}", e.getMessage());
+            }
+        }
+        return "Tool not found: " + toolName;
+    }
+
     // ==================== 内部数据类 ====================
 
     private record PreparedToolCall(
@@ -781,7 +981,8 @@ public class ToolExecutionExecutor {
             int resultIndex,
             String conversationId,
             String requesterId,
-            String workspaceBasePath
+            String workspaceBasePath,
+            ChatOrigin origin
     ) {}
 
     private record ApprovalBarrier(String pendingId, String toolName) {}
@@ -839,5 +1040,58 @@ public class ToolExecutionExecutor {
         public boolean hasDirectOutputs() {
             return directOutputs != null && !directOutputs.isEmpty();
         }
+    }
+
+    /**
+     * RFC-03 Lane A2 — outcome of {@link #capToolCalls(List, int)}. Holds the
+     * (possibly trimmed) effective list, any synthesized truncation responses
+     * that should be appended verbatim to the result, and a boolean flag so
+     * the caller can decide whether to emit an audit event.
+     */
+    record CappedToolCalls(
+            List<AssistantMessage.ToolCall> effective,
+            List<ToolResponseMessage.ToolResponse> truncatedResponses,
+            boolean wasTruncated
+    ) {}
+
+    /**
+     * RFC-03 Lane A2 — pure helper used at the top of {@link #execute}.
+     *
+     * <p>Returns the input untouched when {@code calls.size() <= maxPerResponse}.
+     * Otherwise:
+     * <ul>
+     *   <li>{@link CappedToolCalls#effective} = first {@code maxPerResponse} calls.</li>
+     *   <li>{@link CappedToolCalls#truncatedResponses} = one synthetic
+     *       {@link ToolResponseMessage.ToolResponse} per dropped call,
+     *       so the LLM gets a paired tool response on its next turn instead
+     *       of hanging on missing replies (some providers reject the request
+     *       entirely if any tool_call lacks a response).</li>
+     *   <li>{@link CappedToolCalls#wasTruncated} = true.</li>
+     * </ul>
+     *
+     * <p>Package-private so {@code ToolExecutionExecutorCapToolCallsTest}
+     * can drive every branch without booting a Spring context.
+     */
+    static CappedToolCalls capToolCalls(List<AssistantMessage.ToolCall> calls, int maxPerResponse) {
+        if (calls == null || calls.size() <= maxPerResponse) {
+            return new CappedToolCalls(
+                    calls == null ? List.of() : calls,
+                    List.of(),
+                    false);
+        }
+        List<ToolResponseMessage.ToolResponse> truncated = new ArrayList<>(calls.size() - maxPerResponse);
+        for (int i = maxPerResponse; i < calls.size(); i++) {
+            AssistantMessage.ToolCall dropped = calls.get(i);
+            truncated.add(new ToolResponseMessage.ToolResponse(
+                    dropped.id(),
+                    dropped.name(),
+                    "[truncated] tool_call dropped: model returned " + calls.size()
+                            + " calls in one response but executor cap is " + maxPerResponse
+                            + "; please reissue the most-important calls first"));
+        }
+        return new CappedToolCalls(
+                calls.subList(0, maxPerResponse),
+                truncated,
+                true);
     }
 }

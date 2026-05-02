@@ -1,17 +1,24 @@
 package vip.mate.channel.controller;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.*;
 import vip.mate.channel.ChannelManager;
 import vip.mate.channel.model.ChannelEntity;
 import vip.mate.channel.service.ChannelService;
+import vip.mate.channel.verifier.ChannelVerifierRegistry;
+import vip.mate.channel.verifier.VerificationRequest;
+import vip.mate.channel.verifier.VerificationResult;
 import vip.mate.audit.service.AuditEventService;
 import vip.mate.common.result.R;
 import vip.mate.exception.MateClawException;
 import vip.mate.workspace.core.annotation.RequireWorkspaceRole;
 
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -23,6 +30,7 @@ import java.util.Map;
  *
  * @author MateClaw Team
  */
+@Slf4j
 @Tag(name = "渠道管理")
 @RestController
 @RequestMapping("/api/v1/channels")
@@ -32,6 +40,8 @@ public class ChannelController {
     private final ChannelService channelService;
     private final ChannelManager channelManager;
     private final AuditEventService auditEventService;
+    private final ChannelVerifierRegistry verifierRegistry;
+    private final ObjectMapper objectMapper;
 
     @RequireWorkspaceRole("viewer")
     @Operation(summary = "获取渠道列表")
@@ -129,6 +139,99 @@ public class ChannelController {
     public R<Map<String, Object>> status() {
         return R.ok(channelManager.getStatus());
     }
+
+    @RequireWorkspaceRole("viewer")
+    @Operation(summary = "获取指定渠道的实时健康状态（真连接状态，前端绿点应该绑这个）")
+    @GetMapping("/{id}/health")
+    public R<Map<String, Object>> health(@PathVariable Long id,
+                                          @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) {
+        ChannelEntity channel = channelService.getChannel(id);
+        verifyResourceWorkspace(channel.getWorkspaceId(), workspaceId);
+        return R.ok(channelManager.getAdapter(id)
+                .map(adapter -> adapter.health().toMap())
+                .orElseGet(() -> {
+                    // Adapter not in active map: either disabled, never started,
+                    // or still booting. Surface as OUT_OF_SERVICE so the frontend
+                    // dot stays gray instead of red.
+                    Map<String, Object> body = new java.util.LinkedHashMap<>();
+                    body.put("channelType", channel.getChannelType());
+                    body.put("channelId", id);
+                    body.put("status", "OUT_OF_SERVICE");
+                    body.put("detail", Boolean.TRUE.equals(channel.getEnabled())
+                            ? "channel enabled but adapter not active" : "channel disabled");
+                    return body;
+                }));
+    }
+
+    @RequireWorkspaceRole("admin")
+    @Operation(summary = "批量获取所有渠道健康状态")
+    @GetMapping("/health")
+    public R<List<Map<String, Object>>> healthAll(
+            @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) {
+        long ws = workspaceId != null ? workspaceId : 1L;
+        return R.ok(channelService.listChannelsByWorkspace(ws).stream()
+                .map(c -> {
+                    Map<String, Object> body = channelManager.getAdapter(c.getId())
+                            .map(a -> a.health().toMap())
+                            .orElseGet(() -> {
+                                Map<String, Object> m = new java.util.LinkedHashMap<>();
+                                m.put("channelType", c.getChannelType());
+                                m.put("channelId", c.getId());
+                                m.put("status", "OUT_OF_SERVICE");
+                                m.put("detail", Boolean.TRUE.equals(c.getEnabled())
+                                        ? "channel enabled but adapter not active" : "channel disabled");
+                                return m;
+                            });
+                    body.put("name", c.getName());
+                    body.put("enabled", Boolean.TRUE.equals(c.getEnabled()));
+                    body.put("identity", parseIdentity(c.getIdentityJson()));
+                    return body;
+                })
+                .toList());
+    }
+
+    /**
+     * Parse identity_json into a map for the list-page card. Returns an
+     * empty map for legacy rows that have not been re-verified yet, so the
+     * frontend can render the type-level description as a fallback.
+     */
+    private Map<String, Object> parseIdentity(String identityJson) {
+        if (identityJson == null || identityJson.isBlank()) return Collections.emptyMap();
+        try {
+            return objectMapper.readValue(identityJson, new TypeReference<>() {});
+        } catch (Exception e) {
+            log.debug("identity_json parse failed (treating as empty): {}", e.getMessage());
+            return Collections.emptyMap();
+        }
+    }
+
+    @RequireWorkspaceRole("admin")
+    @Operation(summary = "Pre-flight: validate draft channel config without persisting")
+    @PostMapping("/preflight")
+    public R<VerificationResult> preflight(
+            @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId,
+            @RequestBody PreflightRequest body) {
+        long ws = workspaceId != null ? workspaceId : 1L;
+        Map<String, Object> config = parseConfigJson(body.configJson());
+        return verifierRegistry.find(body.channelType())
+                .map(v -> R.ok(v.verify(new VerificationRequest(body.channelType(), config, ws))))
+                .orElseGet(() -> R.ok(VerificationResult.skipped(
+                        "No verifier registered for channel type '" + body.channelType()
+                                + "' — skipping live check.")));
+    }
+
+    private Map<String, Object> parseConfigJson(String json) {
+        if (json == null || json.isBlank()) return Collections.emptyMap();
+        try {
+            return objectMapper.readValue(json, new TypeReference<>() {});
+        } catch (Exception e) {
+            log.debug("preflight: invalid configJson, treating as empty: {}", e.getMessage());
+            return Collections.emptyMap();
+        }
+    }
+
+    /** Wizard Step 2 payload — channel type + draft configJson, no entity yet. */
+    public record PreflightRequest(String channelType, String configJson) {}
 
     private void verifyResourceWorkspace(Long resourceWorkspaceId, Long headerWorkspaceId) {
         long requestedWs = headerWorkspaceId != null ? headerWorkspaceId : 1L;

@@ -170,6 +170,37 @@ export const skillApi = {
   refreshRuntime: () => http.post('/skills/runtime/refresh'),
   exportWorkspace: (id: string | number) => http.post(`/skills/${id}/export-workspace`),
   getWorkspaceInfo: (id: string | number) => http.get(`/skills/${id}/workspace`),
+  // RFC-090 §7 + §11.4 — pre-flight requirements + LESSONS.md + reverse lookup
+  requirements: (id: string | number) => http.get(`/skills/${id}/requirements`),
+  getLessons: (id: string | number) => http.get(`/skills/${id}/lessons`),
+  clearLessons: (id: string | number) => http.post(`/skills/${id}/lessons/clear`),
+  employees: (id: string | number) => http.get(`/skills/${id}/employees`),
+}
+
+// ==================== Activity Feed (RFC-090 §4.5) ====================
+export const activityApi = {
+  feed: (params: { source?: string; page?: number; size?: number; workspaceId?: number } = {}) =>
+    http.get('/activity/feed', { params }),
+}
+
+// ==================== ACP Endpoints (RFC-090 Phase 7) ====================
+export const acpApi = {
+  list: () => http.get('/acp/endpoints'),
+  get: (id: number | string) => http.get(`/acp/endpoints/${id}`),
+  create: (data: any) => http.post('/acp/endpoints', data),
+  update: (id: number | string, data: any) => http.put(`/acp/endpoints/${id}`, data),
+  delete: (id: number | string) => http.delete(`/acp/endpoints/${id}`),
+  toggle: (id: number | string, enabled: boolean) =>
+    http.put(`/acp/endpoints/${id}/toggle?enabled=${enabled}`),
+  test: (id: number | string) => http.post(`/acp/endpoints/${id}/test`),
+}
+
+// ==================== Skill Templates (RFC-091) ====================
+export const skillTemplateApi = {
+  list: () => http.get('/skill-templates'),
+  get: (id: string) => http.get(`/skill-templates/${id}`),
+  instantiate: (id: string, values: Record<string, unknown>) =>
+    http.post(`/skill-templates/${id}/instantiate`, values),
 }
 
 // ==================== Skill Install ====================
@@ -228,6 +259,17 @@ export const channelApi = {
   toggle: (id: string | number, enabled: boolean) =>
     http.put(`/channels/${id}/toggle?enabled=${enabled}`),
   status: () => http.get('/channels/status'),
+  /** Real-time per-channel health (true transport state, not DB enabled flag). */
+  health: (id: string | number) => http.get(`/channels/${id}/health`),
+  /** Batch health for all channels in current workspace. */
+  healthAll: () => http.get('/channels/health'),
+  /**
+   * Wizard Step 2 — validate a draft config without persisting.
+   * Returns a VerificationResult: { ok, skipped, durationMs, headline,
+   * identity, invalidField, hint }.
+   */
+  preflight: (channelType: string, configJson: string) =>
+    http.post('/channels/preflight', { channelType, configJson }),
   // 微信 iLink Bot QR 码登录
   weixinQrcode: () => http.get('/channels/webhook/weixin/qrcode'),
   weixinQrcodeStatus: (qrcode: string) =>
@@ -276,8 +318,15 @@ export const modelApi = {
   updateProviderConfig: (providerId: string, data: any) =>
     http.put(`/models/${providerId}/config`, data),
   createCustomProvider: (data: any) => http.post('/models/custom-providers', data),
-  deleteCustomProvider: (providerId: string) =>
-    http.delete(`/models/custom-providers/${providerId}`),
+  // Issue #39: fall back to a query-param endpoint when the providerId can't
+  // safely sit in a path segment (slash / space / etc.) — those rows would
+  // otherwise be undeletable because Spring's {providerId} doesn't span "/".
+  deleteCustomProvider: (providerId: string) => {
+    const safe = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(providerId)
+    return safe
+      ? http.delete(`/models/custom-providers/${providerId}`)
+      : http.delete('/models/custom-providers', { params: { providerId } })
+  },
   addProviderModel: (providerId: string, data: any) =>
     http.post(`/models/${providerId}/models`, data),
   removeProviderModel: (providerId: string, modelId: string) =>
@@ -422,6 +471,8 @@ export const cronJobApi = {
   toggle: (id: string | number, enabled: boolean) =>
     http.put(`/cron-jobs/${id}/toggle`, null, { params: { enabled } }),
   runNow: (id: string | number) => http.post(`/cron-jobs/${id}/run`),
+  activeRuns: (conversationId: string) =>
+    http.get('/cron-jobs/active-runs', { params: { conversationId } }),
 }
 
 // ==================== Wiki Knowledge Base ====================
@@ -574,4 +625,31 @@ export const auditApi = {
     page?: number
     size?: number
   }) => http.get('/audit/events', { params }),
+}
+
+// ==================== Feature Flags ====================
+export interface FeatureFlag {
+  id: number
+  flagKey: string
+  enabled: boolean
+  description?: string
+  whitelistKbIds?: string
+  whitelistUserIds?: string
+  rolloutPercent?: number
+  createTime?: string
+  updateTime?: string
+}
+
+export interface FeatureFlagUpdate {
+  enabled?: boolean
+  description?: string
+  whitelistKbIds?: string
+  whitelistUserIds?: string
+  rolloutPercent?: number
+}
+
+export const featureFlagApi = {
+  list: () => http.get<FeatureFlag[]>('/feature-flags'),
+  update: (flagKey: string, data: FeatureFlagUpdate) =>
+    http.put(`/feature-flags/${flagKey}`, data),
 }

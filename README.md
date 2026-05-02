@@ -28,6 +28,10 @@
 
 ---
 
+> **Other personal AI agents are built for one person. MateClaw is the one your IT department can actually sign off on.**
+>
+> Multi-user workspaces. Approval-gated sensitive actions. Full audit trail. Spring Boot Actuator health monitoring. Per-channel error isolation so one chat platform's outage doesn't take down the rest. One JAR on your own machine, zero data egress.
+
 Most AI tools die when their vendor has a bad day. Most forget you the moment the tab closes. Most give you a chatbox and call it a product.
 
 **MateClaw is the whole widget.** One deployment. Reasoning, knowledge, memory, tools, channels — built together, not bolted on. And when your primary model goes down, the next one picks up mid-sentence.
@@ -59,7 +63,7 @@ This is the difference between a warehouse and a library.
 | **Web Console** | Full admin — agents, models, tools, skills, knowledge, security, cron |
 | **Desktop** | Electron app with a bundled JRE 21. Double-click, run. No Java install |
 | **Webchat Widget** | One `<script>` tag embed. Drop it on any site |
-| **IM Channels** | DingTalk · Feishu · WeChat Work · Telegram · Discord · QQ |
+| **IM Channels** | DingTalk · Feishu · WeChat Work · WeChat · Telegram · Discord · QQ · Slack |
 | **Plugin SDK** | Java module for third-party capability packs |
 
 Same brain. Same memory. Same tools. Different doors.
@@ -106,7 +110,7 @@ This is the same shift databases went through around 2010 and cloud went through
 | **Multi-vendor failover** | **Chain + health tracker + cooldown** | Swap providers via config | Orchestration w/ retry | Anthropic only | One model |
 | **Knowledge digestion** | **LLM Wiki + page-level citations** | Canvas + memory | Skills Hub + memory | — | Code index |
 | **Multi-user admin** | **RBAC + approval flow + audit** | Config-file first | Single-user CLI | Enterprise tier | Teams plan |
-| **Surfaces** | Web admin + Desktop + Widget + SDK + 6 IM | 25+ chat channels | 15+ channels (CLI-led) | 3 IM preview | IDE only |
+| **Surfaces** | Web admin + Desktop + Widget + SDK + 8 IM | 25+ chat channels | 15+ channels (CLI-led) | 3 IM preview | IDE only |
 | **Stack** | **Java (Spring Boot)** | TypeScript | Python | TypeScript | Electron/TS |
 | **License / Price** | **Apache 2.0 · Free** | MIT · Free | MIT · Free | Proprietary · $20–200/mo | Proprietary · $0–200/mo |
 
