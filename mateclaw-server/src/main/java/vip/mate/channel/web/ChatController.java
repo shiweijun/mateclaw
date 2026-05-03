@@ -107,7 +107,8 @@ public class ChatController {
             // without sticky session)". They look identical from attach()'s
             // boolean return, but the user-facing remediation is different.
             boolean existsLocally = streamTracker.streamExistsOnThisNode(conversationId);
-            boolean attached = streamTracker.attach(conversationId, emitter);
+            long lastEventId = request.getLastEventId() == null ? 0L : request.getLastEventId();
+            boolean attached = streamTracker.attach(conversationId, emitter, lastEventId);
             if (!attached) {
                 try {
                     if (existsLocally) {
@@ -225,6 +226,8 @@ public class ChatController {
             final String decision = isApprovalCommand ? "approved" : "denied";
 
             streamTracker.register(conversationId);
+            Long approvalAgentId = parseLongOrNull(pending.getAgentId());
+            streamTracker.bindRunMeta(conversationId, approvalAgentId, username);
             registerEmitterCallbacks(emitter, conversationId);
             streamTracker.attach(conversationId, emitter);
             AtomicBoolean approvalEmitterDone = new AtomicBoolean(false);
@@ -445,8 +448,22 @@ public class ChatController {
 
         // ---- 正常请求：注册流状态并附着首个订阅者 ----
         streamTracker.register(conversationId);
+        streamTracker.bindRunMeta(conversationId, agentId, username);
         registerEmitterCallbacks(emitter, conversationId);
         streamTracker.attach(conversationId, emitter);
+
+        // Per-emitter "the SSE channel is open and you should reset any
+        // pending placeholder UI". Sent directly to the emitter rather than
+        // broadcast so reconnecting subscribers don't see a duplicate marker
+        // for an already-open conversation.
+        try {
+            sendEvent(emitter, "stream_started", Map.of(
+                    "conversationId", conversationId,
+                    "timestamp", System.currentTimeMillis()
+            ));
+        } catch (IOException e) {
+            log.debug("Failed to send stream_started event for {}: {}", conversationId, e.getMessage());
+        }
 
         // 标记 emitter 是否已结束，防止 Flux 回调再次写入已关闭的 emitter
         AtomicBoolean emitterDone = new AtomicBoolean(false);
@@ -1008,6 +1025,14 @@ public class ChatController {
         private List<MessageContentPart> contentParts;
         /** true 表示断线重连，不发送新消息，只附着到已有的流 */
         private Boolean reconnect;
+        /**
+         * Last SSE event id the client has already processed. Only meaningful
+         * when {@link #reconnect} is true — the server skips events with
+         * id &le; this value during buffer replay so the client doesn't
+         * see them twice. 0 (or null) means "replay everything", matching
+         * the legacy attach behavior for backwards compatibility.
+         */
+        private Long lastEventId;
         /** 思考深度：off / low / medium / high / max，null 表示跟随 Agent 默认 */
         private String thinkingLevel;
     }
@@ -1755,5 +1780,10 @@ public class ChatController {
                 return "{}";
             }
         }
+    }
+
+    private static Long parseLongOrNull(String s) {
+        if (s == null || s.isBlank()) return null;
+        try { return Long.parseLong(s.trim()); } catch (NumberFormatException e) { return null; }
     }
 }
