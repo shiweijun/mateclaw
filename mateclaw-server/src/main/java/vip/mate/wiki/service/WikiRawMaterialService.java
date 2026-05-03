@@ -42,6 +42,9 @@ public class WikiRawMaterialService {
     private final WikiProperties properties;
     private final ApplicationEventPublisher eventPublisher;
     private final DocumentExtractTool documentExtractTool;
+    /** Optional — wired by Spring; null in minimal test harnesses where the cascade path is exercised separately. */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private WikiPageService pageService;
     /** RFC-013：删除时级联清理 chunk */
     private final WikiChunkService chunkService;
     private final ImageVisionService imageVisionService;
@@ -154,7 +157,7 @@ public class WikiRawMaterialService {
         entity.setKbId(kbId);
         entity.setTitle(title);
         entity.setSourceType(sourceType);
-        entity.setMimeType(mimeType);
+        entity.setMimeType(capMimeType(mimeType));
         entity.setSourcePath(sourcePath);
         entity.setFileSize(fileSize);
         entity.setProcessingStatus("pending");
@@ -193,6 +196,23 @@ public class WikiRawMaterialService {
 
         log.info("[Wiki] Raw file added: id={}, kbId={}, type={}", entity.getId(), kbId, sourceType);
         return entity;
+    }
+
+    /**
+     * Defensive cap on the persisted Content-Type so a long upload header
+     * never blocks the insert. The column itself is wide (V84 → VARCHAR(255))
+     * but capping at the service layer keeps the schema and the writer in
+     * lockstep — we'd rather drop the rare overlong header (chrome-derived
+     * Content-Type with charset / boundary parameters) than fail the upload.
+     */
+    private static final int MIME_TYPE_MAX_CHARS = 255;
+
+    private static String capMimeType(String mimeType) {
+        if (mimeType == null) return null;
+        if (mimeType.length() <= MIME_TYPE_MAX_CHARS) return mimeType;
+        log.warn("[Wiki] Truncating Content-Type ({} chars) to fit storage column: {}",
+                mimeType.length(), mimeType.substring(0, 60) + "…");
+        return mimeType.substring(0, MIME_TYPE_MAX_CHARS);
     }
 
     /**
@@ -316,14 +336,45 @@ public class WikiRawMaterialService {
 
     @Transactional
     public void delete(Long id) {
+        // Load the entity first so we know which KB the cascade lives in.
+        // Once the raw row is gone we'd lose kb_id and couldn't run the
+        // page cleanup; do it before the deleteById.
+        WikiRawMaterialEntity entity = rawMapper.selectById(id);
+
+        // Cascade-delete pages this raw was the sole source of, and strip
+        // the raw_id reference from multi-source pages — same semantics
+        // reprocess uses (WikiProcessingService line ~257). Without this,
+        // pages survive the raw delete and become orphans: search keeps
+        // returning them, the page list is polluted, citations dangle.
+        if (entity != null && entity.getKbId() != null && pageService != null) {
+            try {
+                int cleaned = pageService.deleteExclusiveBySourceRawId(entity.getKbId(), id);
+                if (cleaned > 0) {
+                    log.info("[Wiki] Cascade-deleted {} exclusive page(s) for raw={}", cleaned, id);
+                }
+            } catch (Exception e) {
+                log.warn("[Wiki] Failed to cascade-delete pages for raw={}: {}", id, e.getMessage());
+            }
+        }
+
         rawMapper.deleteById(id);
-        // RFC-013：级联清理 chunk，避免语义搜索命中孤儿 chunk
+
+        // Cascade-clean chunks so semantic search doesn't hit orphan rows.
         try {
             if (chunkService != null) {
                 chunkService.deleteByRawId(id);
             }
         } catch (Exception e) {
             log.warn("[Wiki] Failed to cascade-delete chunks for raw={}: {}", id, e.getMessage());
+        }
+
+        // Source file last — DB pointer is gone, no other row references this
+        // path (each upload gets a timestamp-prefixed unique name), so
+        // leaving it on disk would just accumulate as the upload tree grows.
+        // Failure here is soft-logged and non-blocking — operator can run a
+        // sweep later if disk usage matters more than the delete RTT.
+        if (entity != null) {
+            cleanupFile(entity.getSourcePath());
         }
     }
 
@@ -542,14 +593,18 @@ public class WikiRawMaterialService {
     }
 
     /**
-     * Delete a file from disk if it exists (cleanup for dedup-discarded uploads).
+     * Best-effort delete of an upload-tree file. Used both when a fresh
+     * upload turns out to be a duplicate (the new file is redundant) and
+     * when a raw material row is deleted (its source file becomes a
+     * disk orphan with no DB pointer to it). Idempotent — silently
+     * succeeds when the path is null or the file is already gone.
      */
     private void cleanupFile(String path) {
-        if (path == null) return;
+        if (path == null || path.isBlank()) return;
         try {
             java.nio.file.Files.deleteIfExists(java.nio.file.Paths.get(path));
         } catch (Exception e) {
-            log.warn("[Wiki] Failed to clean up duplicate upload file {}: {}", path, e.getMessage());
+            log.warn("[Wiki] Failed to clean up upload file {}: {}", path, e.getMessage());
         }
     }
 
