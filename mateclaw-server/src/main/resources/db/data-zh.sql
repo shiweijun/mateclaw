@@ -10,21 +10,21 @@ MERGE INTO mate_agent (id, name, description, agent_type, system_prompt, model_n
 KEY (id)
 VALUES (1000000001, 'MateClaw Assistant', '默认 AI 助手，基于 ReAct 模式，支持工具调用', 'react',
         '你是 MateClaw，一个智能 AI 助手。你可以帮助用户回答问题、分析数据、执行任务。请用中文回复，保持专业、友好的态度。',
-        NULL, 100, TRUE, '🤖', 'default,assistant', NOW(), NOW(), 0);
+        NULL, 100, TRUE, 'pi:robot-face-happy', 'default,assistant', NOW(), NOW(), 0);
 
 -- 默认 Agent：任务规划助手（Plan-Execute 模式）
 MERGE INTO mate_agent (id, name, description, agent_type, system_prompt, model_name, max_iterations, enabled, icon, tags, create_time, update_time, deleted)
 KEY (id)
 VALUES (1000000002, 'Task Planner', '任务规划助手，适合复杂多步骤任务', 'plan_execute',
         '你是一个专业的任务规划和执行助手。你擅长将复杂目标分解为可执行的步骤，并逐步完成。请用中文回复。',
-        NULL, 100, TRUE, '📋', 'planning,task', NOW(), NOW(), 0);
+        NULL, 100, TRUE, 'pi:clipboard-note', 'planning,task', NOW(), NOW(), 0);
 
 -- StateGraph ReAct Agent（支持 StateGraph 架构）
 MERGE INTO mate_agent (id, name, description, agent_type, system_prompt, model_name, max_iterations, enabled, icon, tags, create_time, update_time, deleted)
 KEY (id)
 VALUES (1000000003, 'StateGraph ReAct', '基于 StateGraph 的 ReAct Agent，支持显式推理循环和工具调用', 'react',
         '你是基于 StateGraph 架构的智能助手。你可以使用工具来帮助用户解决问题。请用中文回复，保持专业、友好的态度。',
-        NULL, 100, TRUE, '🔄', 'react,stategraph,tools', NOW(), NOW(), 0);
+        NULL, 100, TRUE, 'pi:cpu', 'react,stategraph,tools', NOW(), NOW(), 0);
 
 -- ==================== 本地模型 Provider（优先展示） ====================
 
@@ -57,6 +57,10 @@ VALUES ('modelscope', 'ModelScope', 'ms', 'OpenAIChatModel', '', 'https://api-in
 MERGE INTO mate_model_provider (provider_id, name, api_key_prefix, chat_model, api_key, base_url, generate_kwargs, is_custom, is_local, support_model_discovery, support_connection_check, freeze_url, require_api_key, create_time, update_time)
 KEY (provider_id)
 VALUES ('aliyun-codingplan', 'Aliyun Coding Plan', 'sk-sp', 'OpenAIChatModel', '', 'https://coding.dashscope.aliyuncs.com/v1', '{}', FALSE, FALSE, FALSE, FALSE, TRUE, TRUE, NOW(), NOW());
+
+MERGE INTO mate_model_provider (provider_id, name, api_key_prefix, chat_model, api_key, base_url, generate_kwargs, is_custom, is_local, support_model_discovery, support_connection_check, freeze_url, require_api_key, create_time, update_time)
+KEY (provider_id)
+VALUES ('aliyun-codingplan-intl', 'Aliyun Coding Plan (International)', 'sk-sp', 'OpenAIChatModel', '', 'https://coding-intl.dashscope.aliyuncs.com/v1', '{}', FALSE, FALSE, FALSE, FALSE, TRUE, TRUE, NOW(), NOW());
 
 MERGE INTO mate_model_provider (provider_id, name, api_key_prefix, chat_model, api_key, base_url, generate_kwargs, is_custom, is_local, support_model_discovery, support_connection_check, freeze_url, require_api_key, create_time, update_time)
 KEY (provider_id)
@@ -118,9 +122,17 @@ MERGE INTO mate_model_provider (provider_id, name, api_key_prefix, chat_model, a
 KEY (provider_id)
 VALUES ('volcengine-plan', 'Volcano Engine Coding Plan (火山方舟代码计划)', '', 'OpenAIChatModel', '', 'https://ark.cn-beijing.volces.com/api/coding/v3', '{}', FALSE, FALSE, TRUE, TRUE, TRUE, TRUE, NOW(), NOW());
 
+MERGE INTO mate_model_provider (provider_id, name, api_key_prefix, chat_model, api_key, base_url, generate_kwargs, is_custom, is_local, support_model_discovery, support_connection_check, freeze_url, require_api_key, create_time, update_time)
+KEY (provider_id)
+VALUES ('zhipu-cn-codingplan', 'Zhipu Coding Plan (智谱编码套餐)', '', 'OpenAIChatModel', '', 'https://open.bigmodel.cn/api/coding/paas/v4', '{"completionsPath":"/chat/completions"}', FALSE, FALSE, FALSE, FALSE, TRUE, TRUE, NOW(), NOW());
+
+MERGE INTO mate_model_provider (provider_id, name, api_key_prefix, chat_model, api_key, base_url, generate_kwargs, is_custom, is_local, support_model_discovery, support_connection_check, freeze_url, require_api_key, create_time, update_time)
+KEY (provider_id)
+VALUES ('zhipu-intl-codingplan', 'Zhipu Coding Plan (智谱编码套餐 国际版)', '', 'OpenAIChatModel', '', 'https://api.z.ai/api/coding/paas/v4', '{"completionsPath":"/chat/completions"}', FALSE, FALSE, FALSE, FALSE, TRUE, TRUE, NOW(), NOW());
+
 MERGE INTO mate_model_provider (provider_id, name, api_key_prefix, chat_model, api_key, base_url, generate_kwargs, is_custom, is_local, support_model_discovery, support_connection_check, freeze_url, require_api_key, auth_type, create_time, update_time)
 KEY (provider_id)
-VALUES ('openai-chatgpt', 'OpenAI ChatGPT (OAuth)', '', 'ChatGPTChatModel', '', 'https://chatgpt.com/backend-api', '{}', FALSE, FALSE, FALSE, FALSE, TRUE, FALSE, 'oauth', NOW(), NOW());
+VALUES ('openai-chatgpt', 'OpenAI ChatGPT (OAuth)', '', 'ChatGPTChatModel', '', 'https://chatgpt.com/backend-api', '{}', FALSE, FALSE, TRUE, FALSE, TRUE, FALSE, 'oauth', NOW(), NOW());
 
 -- RFC-062：Anthropic Claude Code OAuth 订阅 provider。凭据存储在本地磁盘
 -- （macOS Keychain 或 ~/.claude/.credentials.json），不写入该行。
@@ -191,6 +203,16 @@ MERGE INTO mate_model_config (id, name, provider, model_name, description, tempe
 (1000000111, 'Qwen3 Max 2026-01-23', 'aliyun-codingplan', 'qwen3-max-2026-01-23', '', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
 (1000000112, 'Qwen3 Coder Next', 'aliyun-codingplan', 'qwen3-coder-next', '', 0.2, 8192, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
 (1000000113, 'Qwen3 Coder Plus', 'aliyun-codingplan', 'qwen3-coder-plus', '', 0.2, 8192, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
+(1000000162, 'Qwen3.6 Plus',         'aliyun-codingplan',      'qwen3.6-plus',         '阿里云编码套餐 — Qwen3.6 Plus 旗舰',                      0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
+(1000000241, 'Qwen3.6 Plus',         'aliyun-codingplan-intl', 'qwen3.6-plus',         '阿里云编码套餐（国际版） — Qwen3.6 Plus 旗舰',            0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
+(1000000242, 'Qwen3.5 Plus',         'aliyun-codingplan-intl', 'qwen3.5-plus',         '阿里云编码套餐（国际版） — Qwen3.5 均衡旗舰',             0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
+(1000000243, 'GLM-5',                'aliyun-codingplan-intl', 'glm-5',                '阿里云编码套餐（国际版） — GLM-5 由 DashScope 托管',       0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
+(1000000244, 'GLM-4.7',              'aliyun-codingplan-intl', 'glm-4.7',              '阿里云编码套餐（国际版） — GLM-4.7 由 DashScope 托管',     0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
+(1000000245, 'MiniMax M2.5',         'aliyun-codingplan-intl', 'MiniMax-M2.5',         '阿里云编码套餐（国际版） — MiniMax M2.5 由 DashScope 托管', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
+(1000000246, 'Kimi K2.5',            'aliyun-codingplan-intl', 'kimi-k2.5',            '阿里云编码套餐（国际版） — Kimi K2.5 由 DashScope 托管',   0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
+(1000000247, 'Qwen3 Max 2026-01-23', 'aliyun-codingplan-intl', 'qwen3-max-2026-01-23', '阿里云编码套餐（国际版） — Qwen3 Max 锁定快照',           0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
+(1000000248, 'Qwen3 Coder Next',     'aliyun-codingplan-intl', 'qwen3-coder-next',     '阿里云编码套餐（国际版） — Qwen3 Coder Next 智能体编码',  0.2, 8192, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
+(1000000249, 'Qwen3 Coder Plus',     'aliyun-codingplan-intl', 'qwen3-coder-plus',     '阿里云编码套餐（国际版） — Qwen3 Coder Plus 智能体编码',  0.2, 8192, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
 (1000000114, 'GPT-5.2', 'openai', 'gpt-5.2', '', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
 (1000000115, 'GPT-5', 'openai', 'gpt-5', '', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
 (1000000116, 'GPT-5 Mini', 'openai', 'gpt-5-mini', '', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
@@ -259,6 +281,14 @@ MERGE INTO mate_model_config (id, name, provider, model_name, description, tempe
 (1000000221, 'GLM-5V-Turbo', 'zhipu-intl', 'glm-5v-turbo', '多模态视觉模型（国际版，推荐）', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
 (1000000222, 'GLM-5', 'zhipu-intl', 'glm-5', '旗舰模型（国际版）', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
 (1000000223, 'GLM-5.1', 'zhipu-intl', 'glm-5.1', '最新旗舰模型（国际版）', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
+(1000000230, 'GLM-5 Coding',       'zhipu-cn-codingplan',   'glm-5',       '智谱编码套餐 — GLM-5 旗舰',                   0.2, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
+(1000000231, 'GLM-5.1 Coding',     'zhipu-cn-codingplan',   'glm-5.1',     '智谱编码套餐 — GLM-5.1 最新旗舰',             0.2, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
+(1000000232, 'GLM-5-Turbo Coding', 'zhipu-cn-codingplan',   'glm-5-turbo', '智谱编码套餐 — GLM-5 高速版',                  0.2, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
+(1000000233, 'GLM-4.7 Coding',     'zhipu-cn-codingplan',   'glm-4.7',     '智谱编码套餐 — GLM-4.7',                       0.2, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
+(1000000234, 'GLM-5 Coding',       'zhipu-intl-codingplan', 'glm-5',       'Zhipu Coding Plan — GLM-5 旗舰（国际版）',     0.2, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
+(1000000235, 'GLM-5.1 Coding',     'zhipu-intl-codingplan', 'glm-5.1',     'Zhipu Coding Plan — GLM-5.1 最新旗舰（国际版）', 0.2, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
+(1000000236, 'GLM-5-Turbo Coding', 'zhipu-intl-codingplan', 'glm-5-turbo', 'Zhipu Coding Plan — GLM-5 高速版（国际版）',   0.2, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
+(1000000237, 'GLM-4.7 Coding',     'zhipu-intl-codingplan', 'glm-4.7',     'Zhipu Coding Plan — GLM-4.7（国际版）',         0.2, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
 (1000000310, 'Doubao Seed 1.8', 'volcengine', 'doubao-seed-1-8-251228', '豆包旗舰多模态模型，文本+图像，256K 上下文', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
 (1000000311, 'Doubao Seed Code Preview', 'volcengine', 'doubao-seed-code-preview-251028', '豆包代码预览模型，文本+图像，256K 上下文', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
 (1000000312, 'Kimi K2.5', 'volcengine', 'kimi-k2-5-260127', 'Kimi K2.5（火山方舟托管），文本+图像，256K 上下文', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
@@ -273,6 +303,7 @@ MERGE INTO mate_model_config (id, name, provider, model_name, description, tempe
 (1000000240, 'Kimi for Coding', 'kimi-code', 'kimi-for-coding', 'Kimi Code 专用编码模型', 0.2, 32768, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
 (1000000250, 'GPT-5.4', 'openai-chatgpt', 'gpt-5.4', 'ChatGPT Plus/Pro 会员模型（OAuth 登录）', NULL, 128000, NULL, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
 (1000000251, 'GPT-5.4 Mini', 'openai-chatgpt', 'gpt-5.4-mini', 'ChatGPT 会员轻量模型', NULL, 128000, NULL, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
+(1000000252, 'GPT-5.5', 'openai-chatgpt', 'gpt-5.5', 'ChatGPT Plus/Pro 会员旗舰模型', NULL, 128000, NULL, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
 -- GPT-5.5 系列（OpenAI / Azure / OpenRouter）
 (1000000260, 'GPT-5.5', 'openai', 'gpt-5.5', '', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
 (1000000261, 'GPT-5.5 Mini', 'openai', 'gpt-5.5-mini', '', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),

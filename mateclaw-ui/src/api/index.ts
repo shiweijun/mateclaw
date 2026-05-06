@@ -7,7 +7,7 @@ export const http = axios.create({
   timeout: 30000,
 })
 
-// 请求拦截器：注入 Token + Workspace ID
+// 请求拦截器：注入 Token + Workspace ID + Accept-Language
 http.interceptors.request.use((config) => {
   const token = localStorage.getItem('token')
   if (token) {
@@ -16,6 +16,15 @@ http.interceptors.request.use((config) => {
   const workspaceId = localStorage.getItem('mc-workspace-id')
   if (workspaceId) {
     config.headers['X-Workspace-Id'] = workspaceId
+  }
+  // Forward the user's UI locale so locale-sensitive endpoints (e.g.
+  // template apply) can pick the right display strings. Native browsers
+  // already send Accept-Language, but the user's chosen UI language may
+  // differ from the OS default — explicitly setting it keeps the two
+  // in sync.
+  const locale = localStorage.getItem('mateclaw_locale')
+  if (locale) {
+    config.headers['Accept-Language'] = locale
   }
   return config
 })
@@ -144,14 +153,18 @@ export const conversationApi = {
 
 // ==================== Skill ====================
 export const skillApi = {
-  /** RFC-042 §2.1 — paginated skill listing with search/type/enabled/scanStatus filters */
+  /** Paginated skill listing with search, source, status, and sort filters. */
   page: (params: {
     page?: number
     size?: number
     keyword?: string
     skillType?: string
+    source?: string
+    sort?: string
+    runtime?: string
+    agentId?: string | number
     enabled?: boolean
-    /** 'PASSED' / 'FAILED' — filters by security_scan_status (RFC-042 §2.3.5) */
+    /** 'PASSED' / 'FAILED' — filters by security_scan_status. */
     scanStatus?: string
   } = {}) => http.get('/skills', { params }),
   /** Tab count aggregate — returns { all, builtin, mcp, dynamic } */
@@ -459,6 +472,15 @@ export const oauthApi = {
   status: () => http.get('/oauth/openai/status'),
   refresh: () => http.post('/oauth/openai/refresh'),
   revoke: () => http.delete('/oauth/openai/revoke'),
+  callbackPaste: (callbackUrl: string) =>
+    http.post('/oauth/openai/callback-paste', { callbackUrl }),
+  // Device Authorization Grant — used when MateClaw runs on a remote host so the
+  // browser cannot reach localhost:1455 for the PKCE callback.
+  deviceStart: () => http.post('/oauth/openai/device/start'),
+  devicePoll: (deviceAuthId: string) =>
+    http.post('/oauth/openai/device/poll', { deviceAuthId }),
+  deviceCancel: (deviceAuthId: string) =>
+    http.post('/oauth/openai/device/cancel', { deviceAuthId }),
 }
 
 // RFC-062: Claude Code OAuth piggybacks on the user's local Claude Code
