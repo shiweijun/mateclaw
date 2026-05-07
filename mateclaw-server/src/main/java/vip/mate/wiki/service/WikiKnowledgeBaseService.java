@@ -7,6 +7,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import vip.mate.wiki.model.WikiKnowledgeBaseEntity;
 import vip.mate.wiki.repository.WikiKnowledgeBaseMapper;
+import vip.mate.agent.binding.service.AgentBindingService;
+import vip.mate.exception.MateClawException;
 
 import java.util.List;
 
@@ -21,6 +23,7 @@ import java.util.List;
 public class WikiKnowledgeBaseService {
 
     private final WikiKnowledgeBaseMapper kbMapper;
+    private final AgentBindingService agentBindingService;
 
     /**
      * RFC-051 PR-2: optional system-page scaffold (overview / log). Marked
@@ -218,6 +221,10 @@ public class WikiKnowledgeBaseService {
 
     @Transactional
     public void delete(Long id) {
+        List<Long> boundAgents = agentBindingService.getBoundAgentIdsByKbId(id);
+        if (!boundAgents.isEmpty()) {
+            throw new MateClawException("该知识库已被数字员工引用，无法删除");
+        }
         kbMapper.deleteById(id);
         log.info("[Wiki] Knowledge base deleted: id={}", id);
     }

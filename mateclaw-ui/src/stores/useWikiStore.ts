@@ -109,6 +109,18 @@ export const useWikiStore = defineStore('wiki', () => {
     }
   }
 
+  async function updateKB(id: number, data: { name?: string; description?: string }) {
+    const res: any = await wikiApi.updateKB(id, data)
+    const updated = res.data || res
+    const idx = knowledgeBases.value.findIndex((kb) => kb.id === id)
+    if (idx >= 0) {
+      knowledgeBases.value[idx] = { ...knowledgeBases.value[idx], ...updated }
+    }
+    if (currentKB.value?.id === id) {
+      currentKB.value = { ...currentKB.value, ...updated }
+    }
+  }
+
   async function fetchRawMaterials(kbId: number) {
     const res: any = await wikiApi.listRaw(kbId)
     rawMaterials.value = res.data || []
@@ -183,6 +195,7 @@ export const useWikiStore = defineStore('wiki', () => {
     selectKB,
     createKB,
     deleteKB,
+    updateKB,
     fetchRawMaterials,
     fetchPages,
     filterPagesByRaw,

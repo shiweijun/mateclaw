@@ -15,11 +15,11 @@ import vip.mate.wiki.dto.*;
 import vip.mate.wiki.job.WikiProcessingJobService;
 import vip.mate.wiki.job.event.WikiJobCreatedEvent;
 import vip.mate.wiki.job.model.WikiProcessingJobEntity;
-import vip.mate.wiki.model.WikiKnowledgeBaseEntity;
 import vip.mate.wiki.model.WikiPageEntity;
 import vip.mate.wiki.model.WikiRawMaterialEntity;
 import vip.mate.wiki.repository.WikiRawMaterialMapper;
 import vip.mate.wiki.service.*;
+import vip.mate.agent.binding.service.AgentBindingService;
 
 import java.util.*;
 import java.util.regex.Matcher;
@@ -38,10 +38,10 @@ import java.util.stream.Collectors;
 public class WikiTool {
 
     private final WikiPageService pageService;
-    private final WikiKnowledgeBaseService kbService;
     private final WikiRawMaterialService rawService;
     private final HybridRetriever hybridRetriever;
     private final ObjectMapper objectMapper;
+    private final AgentBindingService agentBindingService;
 
     @Autowired(required = false)
     private WikiRelationService relationService;
@@ -60,15 +60,15 @@ public class WikiTool {
     private WikiCompileService compileService;
 
     public WikiTool(WikiPageService pageService,
-                     WikiKnowledgeBaseService kbService,
                      WikiRawMaterialService rawService,
                      HybridRetriever hybridRetriever,
-                     ObjectMapper objectMapper) {
+                     ObjectMapper objectMapper,
+                     AgentBindingService agentBindingService) {
         this.pageService = pageService;
-        this.kbService = kbService;
         this.rawService = rawService;
         this.hybridRetriever = hybridRetriever;
         this.objectMapper = objectMapper;
+        this.agentBindingService = agentBindingService;
     }
 
     // ==================== RFC-032: Enhanced wiki_read_page ====================
@@ -635,8 +635,9 @@ public class WikiTool {
     // ==================== Helpers ====================
 
     private Long resolveKbId(Long agentId) {
-        List<WikiKnowledgeBaseEntity> kbs = kbService.listByAgentId(agentId);
-        return kbs.isEmpty() ? null : kbs.get(0).getId();
+        Set<Long> kbIds = agentBindingService.getBoundKbIds(agentId);
+        if (kbIds == null || kbIds.isEmpty()) return null;
+        return kbIds.iterator().next();
     }
 
     private JSONArray resolveSourceFiles(String sourceRawIdsJson) {

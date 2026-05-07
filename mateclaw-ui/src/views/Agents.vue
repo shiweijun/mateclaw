@@ -200,6 +200,10 @@
               {{ t('agents.tabs.skills', 'Skills') }}
               <span v-if="selectedSkillIds.length" class="tab-badge">{{ selectedSkillIds.length }}</span>
             </button>
+            <button v-if="editingAgent" class="modal-tab" :class="{ active: modalTab === 'knowledge-bases' }" @click="modalTab = 'knowledge-bases'">
+              {{ t('agents.tabs.knowledgeBases', 'Knowledge Bases') }}
+              <span v-if="selectedKbIds.length" class="tab-badge">{{ selectedKbIds.length }}</span>
+            </button>
             <button v-if="editingAgent" class="modal-tab" :class="{ active: modalTab === 'tools' }" @click="modalTab = 'tools'">
               {{ t('agents.tabs.tools', 'Tools') }}
               <span v-if="selectedToolNames.length" class="tab-badge">{{ selectedToolNames.length }}</span>
@@ -337,6 +341,31 @@
             </div>
           </div>
 
+          <!-- Knowledge Bases Tab -->
+          <div v-if="modalTab === 'knowledge-bases'" class="binding-tab">
+            <div class="binding-intro">
+              <span class="binding-intro__kicker">{{ t('agents.binding.kbKicker') }}</span>
+              <p class="binding-intro__tagline">{{ t('agents.binding.kbTagline') }}</p>
+            </div>
+            <p class="binding-hint">{{ t('agents.binding.kbHint') }}</p>
+            <div v-if="availableKBs.length === 0" class="binding-empty">{{ t('agents.binding.noKBs') }}</div>
+            <div v-else class="binding-list">
+              <label
+                v-for="kb in availableKBs"
+                :key="kb.id"
+                class="binding-item"
+                :class="{ selected: selectedKbIds.includes(kb.id) }"
+              >
+                <input type="checkbox" :value="kb.id" v-model="selectedKbIds" class="binding-checkbox" />
+                <span class="binding-icon">📚</span>
+                <div class="binding-info">
+                  <span class="binding-name">{{ kb.name }}</span>
+                  <span v-if="kb.description" class="binding-desc">{{ kb.description?.slice(0, 80) }}</span>
+                </div>
+              </label>
+            </div>
+          </div>
+
           <!-- Tools Tab — RFC-090 §9.2 调整 B: Advanced bypass for atomic
                tools not packaged as skills (e.g. datetime, delegate_agent).
                Skill bindings already auto-expand allowed-tools (§14.2), so
@@ -425,7 +454,7 @@ import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus'
 import { mcConfirm } from '@/components/common/useConfirm'
-import { agentApi, agentBindingApi, modelApi, skillApi, toolApi, templateApi, backstageApi } from '@/api/index'
+import { agentApi, agentBindingApi, modelApi, skillApi, toolApi, templateApi, backstageApi, wikiApi } from '@/api/index'
 import type { Agent } from '@/types/index'
 import SkillIcon from '@/components/common/SkillIcon.vue'
 import SkillIconPicker from '@/components/common/SkillIconPicker.vue'
@@ -447,7 +476,7 @@ const searchText = ref('')
 const activeFilter = ref('all')
 const showModal = ref(false)
 const editingAgent = ref<Agent | null>(null)
-const modalTab = ref<'basic' | 'skills' | 'tools' | 'providers'>('basic')
+const modalTab = ref<'basic' | 'skills' | 'knowledge-bases' | 'tools' | 'providers'>('basic')
 /** RFC-090 §9.2 调整 B — Tool picker is an Advanced bypass; collapsed by
  *  default but stays open as soon as the agent has any direct tool
  *  bindings, so existing users don't lose visibility on their picks. */
@@ -457,6 +486,8 @@ const advancedToolsOpen = ref(false)
 const availableSkills = ref<any[]>([])
 const availableTools = ref<any[]>([])
 const selectedSkillIds = ref<number[]>([])
+const selectedKbIds = ref<number[]>([])
+const availableKBs = ref<any[]>([])
 const selectedToolNames = ref<string[]>([])
 // RFC-009 PR-3: per-agent provider preference order
 const availableProviders = ref<{ id: string; name: string }[]>([])
@@ -600,6 +631,8 @@ function openBlankCreateModal() {
   profileForm.value = emptyProfile()
   modalTab.value = 'basic'
   selectedSkillIds.value = []
+  selectedKbIds.value = []
+  availableKBs.value = []
   selectedToolNames.value = []
   selectedProviderIds.value = []
   showModal.value = true
@@ -675,7 +708,7 @@ async function openEditModal(agent: Agent) {
 
   // Load available skills/tools/providers and current bindings in parallel
   try {
-    const [skillsRes, toolsRes, providersRes, boundSkillsRes, boundToolsRes, providerPrefsRes] = await Promise.all([
+    const [skillsRes, toolsRes, providersRes, boundSkillsRes, boundToolsRes, providerPrefsRes, kbsRes, boundKbsRes] = await Promise.all([
       // RFC-042: /skills is now paginated; binding dropdown only needs enabled skills,
       // so listEnabled() is both semantically correct and shape-stable (returns array).
       skillApi.listEnabled(),
@@ -684,6 +717,8 @@ async function openEditModal(agent: Agent) {
       agentBindingApi.listSkills(agent.id),
       agentBindingApi.listTools(agent.id),
       agentBindingApi.listProviderPreferences(agent.id),
+      wikiApi.listKBs(),
+      agentBindingApi.listKnowledgeBases(agent.id),
     ])
     availableSkills.value = (skillsRes as any).data || []
     availableTools.value = (toolsRes as any).data || []
@@ -701,6 +736,10 @@ async function openEditModal(agent: Agent) {
     selectedProviderIds.value = ((providerPrefsRes as any).data || [])
       .filter((b: any) => b.enabled)
       .map((b: any) => b.providerId)
+    availableKBs.value = ((kbsRes as any).data || [])
+    selectedKbIds.value = ((boundKbsRes as any).data || [])
+      .filter((b: any) => b.enabled)
+      .map((b: any) => b.kbId)
   } catch {
     // Non-blocking: binding data load failure doesn't prevent editing basic info
   }
@@ -732,6 +771,7 @@ async function saveAgent() {
     if (agentId && editingAgent.value) {
       await Promise.all([
         agentBindingApi.setSkills(agentId, selectedSkillIds.value),
+        agentBindingApi.setKnowledgeBases(agentId, selectedKbIds.value),
         agentBindingApi.setTools(agentId, selectedToolNames.value),
         agentBindingApi.setProviderPreferences(agentId, selectedProviderIds.value),
       ])

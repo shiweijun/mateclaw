@@ -6,9 +6,11 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
+import vip.mate.agent.binding.model.AgentKnowledgeBaseBinding;
 import vip.mate.agent.binding.model.AgentProviderPreference;
 import vip.mate.agent.binding.model.AgentSkillBinding;
 import vip.mate.agent.binding.model.AgentToolBinding;
+import vip.mate.agent.binding.repository.AgentKnowledgeBaseBindingMapper;
 import vip.mate.agent.binding.repository.AgentProviderPreferenceMapper;
 import vip.mate.agent.binding.repository.AgentSkillBindingMapper;
 import vip.mate.agent.binding.repository.AgentToolBindingMapper;
@@ -37,6 +39,7 @@ public class AgentBindingService {
     private final AgentSkillBindingMapper skillBindingMapper;
     private final AgentToolBindingMapper toolBindingMapper;
     private final AgentProviderPreferenceMapper providerPreferenceMapper;
+    private final AgentKnowledgeBaseBindingMapper kbBindingMapper;
     /**
      * {@code @Lazy} — SkillRuntimeService and AgentBindingService both sit
      * near the agent boot path; the lazy proxy avoids a circular bean
@@ -48,10 +51,12 @@ public class AgentBindingService {
     public AgentBindingService(AgentSkillBindingMapper skillBindingMapper,
                                AgentToolBindingMapper toolBindingMapper,
                                AgentProviderPreferenceMapper providerPreferenceMapper,
+                               AgentKnowledgeBaseBindingMapper kbBindingMapper,
                                @Lazy SkillRuntimeService skillRuntimeService) {
         this.skillBindingMapper = skillBindingMapper;
         this.toolBindingMapper = toolBindingMapper;
         this.providerPreferenceMapper = providerPreferenceMapper;
+        this.kbBindingMapper = kbBindingMapper;
         this.skillRuntimeService = skillRuntimeService;
     }
 
@@ -397,6 +402,83 @@ public class AgentBindingService {
             row.setSortOrder(order++);
             row.setEnabled(true);
             providerPreferenceMapper.insert(row);
+        }
+    }
+
+    // ==================== Knowledge Base Bindings ====================
+
+    public List<AgentKnowledgeBaseBinding> listKbBindings(Long agentId) {
+        return kbBindingMapper.selectList(
+                new LambdaQueryWrapper<AgentKnowledgeBaseBinding>()
+                        .eq(AgentKnowledgeBaseBinding::getAgentId, agentId)
+                        .orderByAsc(AgentKnowledgeBaseBinding::getCreateTime));
+    }
+
+    /**
+     * 获取 Agent 绑定的 enabled kb ID 集合。
+     * 空集合表示该 agent 没有绑定任何知识库（Wiki 完全不可用）。
+     */
+    public Set<Long> getBoundKbIds(Long agentId) {
+        return listKbBindings(agentId).stream()
+                .filter(b -> Boolean.TRUE.equals(b.getEnabled()))
+                .map(AgentKnowledgeBaseBinding::getKbId)
+                .collect(Collectors.toSet());
+    }
+
+    /**
+     * 按 kbId 反查绑定了该知识库的 Agent ID 列表。
+     * 用于删除知识库前的引用检查。
+     */
+    public List<Long> getBoundAgentIdsByKbId(Long kbId) {
+        return kbBindingMapper.selectList(
+                        new LambdaQueryWrapper<AgentKnowledgeBaseBinding>()
+                                .eq(AgentKnowledgeBaseBinding::getKbId, kbId)
+                                .eq(AgentKnowledgeBaseBinding::getEnabled, true))
+                .stream()
+                .map(AgentKnowledgeBaseBinding::getAgentId)
+                .collect(Collectors.toList());
+    }
+
+    public AgentKnowledgeBaseBinding bindKb(Long agentId, Long kbId) {
+        AgentKnowledgeBaseBinding existing = kbBindingMapper.selectOne(
+                new LambdaQueryWrapper<AgentKnowledgeBaseBinding>()
+                        .eq(AgentKnowledgeBaseBinding::getAgentId, agentId)
+                        .eq(AgentKnowledgeBaseBinding::getKbId, kbId));
+        if (existing != null) {
+            existing.setEnabled(true);
+            kbBindingMapper.updateById(existing);
+            return existing;
+        }
+        AgentKnowledgeBaseBinding binding = new AgentKnowledgeBaseBinding();
+        binding.setAgentId(agentId);
+        binding.setKbId(kbId);
+        binding.setEnabled(true);
+        kbBindingMapper.insert(binding);
+        return binding;
+    }
+
+    public void unbindKb(Long agentId, Long kbId) {
+        kbBindingMapper.delete(
+                new LambdaQueryWrapper<AgentKnowledgeBaseBinding>()
+                        .eq(AgentKnowledgeBaseBinding::getAgentId, agentId)
+                        .eq(AgentKnowledgeBaseBinding::getKbId, kbId));
+    }
+
+    /**
+     * 批量设置 Agent 的知识库绑定（替换模式）
+     */
+    public void setKbBindings(Long agentId, List<Long> kbIds) {
+        kbBindingMapper.delete(
+                new LambdaQueryWrapper<AgentKnowledgeBaseBinding>()
+                        .eq(AgentKnowledgeBaseBinding::getAgentId, agentId));
+        if (kbIds != null) {
+            for (Long kbId : kbIds) {
+                AgentKnowledgeBaseBinding binding = new AgentKnowledgeBaseBinding();
+                binding.setAgentId(agentId);
+                binding.setKbId(kbId);
+                binding.setEnabled(true);
+                kbBindingMapper.insert(binding);
+            }
         }
     }
 }

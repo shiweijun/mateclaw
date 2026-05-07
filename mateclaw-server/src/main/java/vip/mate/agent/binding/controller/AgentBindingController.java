@@ -5,6 +5,7 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
 import vip.mate.agent.AgentService;
+import vip.mate.agent.binding.model.AgentKnowledgeBaseBinding;
 import vip.mate.agent.binding.model.AgentProviderPreference;
 import vip.mate.agent.binding.model.AgentSkillBinding;
 import vip.mate.agent.binding.model.AgentToolBinding;
@@ -127,6 +128,56 @@ public class AgentBindingController {
         agentService.invalidateAgentCache(agentId);
         auditEventService.record("UPDATE", "AGENT_PROVIDER_PREF", String.valueOf(agentId),
                 "providers=" + providerIds.size(), null);
+        return R.ok();
+    }
+
+    // ==================== Knowledge Base Bindings ====================
+
+    @Operation(summary = "获取 Agent 已绑定的知识库")
+    @GetMapping("/knowledge-bases")
+    @RequireWorkspaceRole("viewer")
+    public R<List<AgentKnowledgeBaseBinding>> listKnowledgeBases(
+            @PathVariable Long agentId,
+            @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) {
+        verifyAgentWorkspace(agentId, workspaceId);
+        return R.ok(bindingService.listKbBindings(agentId));
+    }
+
+    @Operation(summary = "批量设置 Agent 的知识库绑定")
+    @PutMapping("/knowledge-bases")
+    @RequireWorkspaceRole("member")
+    public R<Void> setKnowledgeBases(
+            @PathVariable Long agentId, @RequestBody List<Long> kbIds,
+            @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) {
+        verifyAgentWorkspace(agentId, workspaceId);
+        bindingService.setKbBindings(agentId, kbIds);
+        agentService.invalidateAgentCache(agentId);
+        auditEventService.record("UPDATE", "AGENT_KB", String.valueOf(agentId),
+                "knowledgeBases=" + kbIds.size(), null);
+        return R.ok();
+    }
+
+    @Operation(summary = "绑定单个知识库")
+    @PostMapping("/knowledge-bases/{kbId}")
+    @RequireWorkspaceRole("member")
+    public R<AgentKnowledgeBaseBinding> bindKnowledgeBase(
+            @PathVariable Long agentId, @PathVariable Long kbId,
+            @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) {
+        verifyAgentWorkspace(agentId, workspaceId);
+        AgentKnowledgeBaseBinding binding = bindingService.bindKb(agentId, kbId);
+        agentService.invalidateAgentCache(agentId);
+        return R.ok(binding);
+    }
+
+    @Operation(summary = "解绑单个知识库")
+    @DeleteMapping("/knowledge-bases/{kbId}")
+    @RequireWorkspaceRole("member")
+    public R<Void> unbindKnowledgeBase(
+            @PathVariable Long agentId, @PathVariable Long kbId,
+            @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) {
+        verifyAgentWorkspace(agentId, workspaceId);
+        bindingService.unbindKb(agentId, kbId);
+        agentService.invalidateAgentCache(agentId);
         return R.ok();
     }
 

@@ -7,8 +7,11 @@ import vip.mate.memory.spi.MemoryProvider;
 import vip.mate.system.featureflag.FeatureFlagService;
 import vip.mate.wiki.model.WikiKnowledgeBaseEntity;
 import vip.mate.wiki.service.WikiKnowledgeBaseService;
+import vip.mate.agent.binding.service.AgentBindingService;
 
 import java.util.List;
+import java.util.Objects;
+import java.util.Set;
 
 /**
  * Memory-SPI provider that injects each KB's hot cache snapshot into the
@@ -36,6 +39,7 @@ public class WikiHotCacheProvider implements MemoryProvider {
 
     private final WikiHotCacheService cacheService;
     private final WikiKnowledgeBaseService kbService;
+    private final AgentBindingService agentBindingService;
     private final FeatureFlagService featureFlagService;
 
     @Override
@@ -58,7 +62,7 @@ public class WikiHotCacheProvider implements MemoryProvider {
         try {
             if (!featureFlagService.isEnabled(FLAG)) return "";
 
-            List<WikiKnowledgeBaseEntity> kbs = kbService.listByAgentId(agentId);
+            List<WikiKnowledgeBaseEntity> kbs = resolveBoundKbs(agentId);
             if (kbs.isEmpty()) return "";
 
             StringBuilder sb = new StringBuilder();
@@ -81,5 +85,19 @@ public class WikiHotCacheProvider implements MemoryProvider {
                     agentId, e.getMessage());
             return "";
         }
+    }
+
+    private List<WikiKnowledgeBaseEntity> resolveBoundKbs(Long agentId) {
+        Set<Long> kbIds = agentBindingService.getBoundKbIds(agentId);
+        if (kbIds == null || kbIds.isEmpty()) {
+            return List.of();
+        }
+        return kbIds.stream()
+                .map(kbId -> {
+                    try { return kbService.getById(kbId); }
+                    catch (Exception e) { return null; }
+                })
+                .filter(Objects::nonNull)
+                .toList();
     }
 }

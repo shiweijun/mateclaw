@@ -681,6 +681,8 @@ export const agentBindingApi = {
     http.get(`/agents/${agentId}/provider-preferences`),
   setProviderPreferences: (agentId: string | number, providerIds: string[]) =>
     http.put(`/agents/${agentId}/provider-preferences`, providerIds),
+  listKnowledgeBases: (agentId: string | number) => http.get(`/agents/${agentId}/knowledge-bases`),
+  setKnowledgeBases: (agentId: string | number, kbIds: number[]) => http.put(`/agents/${agentId}/knowledge-bases`, kbIds),
 }
 
 // ==================== Dashboard ====================

@@ -7,9 +7,11 @@ import vip.mate.wiki.WikiProperties;
 import vip.mate.wiki.dto.PageSearchResult;
 import vip.mate.wiki.model.WikiKnowledgeBaseEntity;
 import vip.mate.wiki.model.WikiPageEntity;
+import vip.mate.agent.binding.service.AgentBindingService;
 
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.Set;
 
 /**
@@ -24,6 +26,7 @@ import java.util.Set;
 public class WikiContextService {
 
     private final WikiKnowledgeBaseService kbService;
+    private final AgentBindingService agentBindingService;
     private final WikiPageService pageService;
     private final HybridRetriever hybridRetriever;
     private final WikiProperties properties;
@@ -61,7 +64,7 @@ public class WikiContextService {
             return "";
         }
 
-        List<WikiKnowledgeBaseEntity> kbs = kbService.listByAgentId(agentId);
+        List<WikiKnowledgeBaseEntity> kbs = resolveBoundKbs(agentId);
         if (kbs.isEmpty()) {
             return "";
         }
@@ -126,7 +129,7 @@ public class WikiContextService {
             return "";
         }
 
-        List<WikiKnowledgeBaseEntity> kbs = kbService.listByAgentId(agentId);
+        List<WikiKnowledgeBaseEntity> kbs = resolveBoundKbs(agentId);
         if (kbs.isEmpty()) {
             return "";
         }
@@ -175,5 +178,19 @@ public class WikiContextService {
         sb.append("</wiki-context>");
 
         return sb.toString();
+    }
+
+    private List<WikiKnowledgeBaseEntity> resolveBoundKbs(Long agentId) {
+        Set<Long> kbIds = agentBindingService.getBoundKbIds(agentId);
+        if (kbIds == null || kbIds.isEmpty()) {
+            return List.of();
+        }
+        return kbIds.stream()
+                .map(kbId -> {
+                    try { return kbService.getById(kbId); }
+                    catch (Exception e) { return null; }
+                })
+                .filter(Objects::nonNull)
+                .toList();
     }
 }

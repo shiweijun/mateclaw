@@ -31,7 +31,17 @@
                   class="kb-item" :class="{ active: store.currentKB?.id === kb.id }"
                   @click="selectKB(kb.id)"
                 >
-                  <div class="kb-item-name">{{ kb.name }}</div>
+                  <div class="kb-item-header">
+                    <div class="kb-item-name">{{ kb.name }}</div>
+                    <div class="kb-item-actions" @click.stop>
+                      <button class="kb-action-btn" :title="t('wiki.editKB')" @click="openEditKB(kb)">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                      </button>
+                      <button class="kb-action-btn kb-action-btn--danger" :title="t('wiki.deleteKB')" @click="handleDeleteKB(kb)">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                      </button>
+                    </div>
+                  </div>
                   <div class="kb-item-stats">
                     <span class="stat-chip">
                       <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
@@ -310,6 +320,25 @@
         </div>
       </div>
     </div>
+
+    <!-- Edit KB Modal -->
+    <div v-if="showEditKB" class="modal-overlay" @click.self="showEditKB = false">
+      <div class="modal-content">
+        <h3 class="modal-title">{{ t('wiki.editKB') }}</h3>
+        <div class="form-group">
+          <label>{{ t('wiki.kbName') }}</label>
+          <input v-model="editKBName" type="text" class="form-input" :placeholder="t('wiki.kbNamePlaceholder')" autofocus />
+        </div>
+        <div class="form-group">
+          <label>{{ t('wiki.kbDescription') }}</label>
+          <textarea v-model="editKBDesc" class="form-input" rows="3" :placeholder="t('wiki.kbDescPlaceholder')"></textarea>
+        </div>
+        <div class="modal-actions">
+          <button class="btn-secondary" @click="showEditKB = false">{{ t('common.cancel') }}</button>
+          <button class="btn-primary" @click="handleEditKB" :disabled="!editKBName.trim()">{{ t('common.save') }}</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -354,6 +383,10 @@ watch(() => store.knowledgeBases.length, () => {
 const showCreateKB = ref(false)
 const newKBName = ref('')
 const newKBDesc = ref('')
+const showEditKB = ref(false)
+const editKBId = ref<number | null>(null)
+const editKBName = ref('')
+const editKBDesc = ref('')
 const activeTab = ref('raw')
 const pageSearch = ref('')
 
@@ -533,6 +566,29 @@ async function handleCreateKB() {
   newKBDesc.value = ''
 }
 
+function openEditKB(kb: any) {
+  editKBId.value = kb.id
+  editKBName.value = kb.name || ''
+  editKBDesc.value = kb.description || ''
+  showEditKB.value = true
+}
+
+async function handleEditKB() {
+  if (!editKBId.value) return
+  await store.updateKB(editKBId.value, { name: editKBName.value, description: editKBDesc.value })
+  showEditKB.value = false
+}
+
+async function handleDeleteKB(kb: any) {
+  const confirmed = confirm(t('wiki.deleteKBConfirm', { name: kb.name }))
+  if (!confirmed) return
+  try {
+    await store.deleteKB(kb.id)
+  } catch (e: any) {
+    alert(e?.response?.data?.message || t('wiki.deleteKBFailed'))
+  }
+}
+
 // Infinite scroll: when the page-list container scrolls near the bottom,
 // auto-load more items for the last non-fully-expanded group.
 function onPageListScroll() {
@@ -640,6 +696,18 @@ onMounted(() => {
 .kb-item:hover { background: var(--mc-bg-muted); }
 .kb-item.active { background: var(--mc-primary-bg); border-color: rgba(217, 109, 70, 0.15); }
 .kb-item-name { font-size: 13px; font-weight: 600; color: var(--mc-text-primary); margin-bottom: 5px; }
+.kb-item-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 6px; }
+.kb-item-header .kb-item-name { flex: 1; min-width: 0; }
+.kb-item-actions { display: none; gap: 2px; flex-shrink: 0; }
+.kb-item:hover .kb-item-actions { display: flex; }
+.kb-action-btn {
+  display: flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; border: none; border-radius: 6px;
+  background: transparent; color: var(--mc-text-tertiary); cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.kb-action-btn:hover { background: var(--mc-bg-muted); color: var(--mc-text-primary); }
+.kb-action-btn--danger:hover { color: var(--el-color-danger, #f56c6c); }
 .kb-item-stats { display: flex; align-items: center; gap: 6px; }
 .stat-chip {
   display: inline-flex;

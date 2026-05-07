@@ -1,0 +1,23 @@
+{
+   "env": {
+        "ANTHROPIC_AUTH_TOKEN": "sk-sp-djI.zrp_vVzx89SC3nHi8ejKKTPEQgBfCZP2pm5O95FOJV4adBKQ21D-7pEGvCvJ7VDyhHSXD58sSVfVCi6LBD-La2OBoMirXVwKGaOFUZPoxZOaooimi0T6QWSkVtP_xTtR5kaUA8BliYNLkZuvPxO3GgAmHrEvRcFp7SItvt1wZ0sCTFWjhWg9SCMCe86MU_9e.MEYCIQCc5B3jEnvEG1IyAx01Jlh65w1s2blmHohzeFj_OqCaqgIhAIORoTKU49UgU1oGjYhU3txlt77yLa3p8QhGbQkKQW1-",
+        "ANTHROPIC_BASE_URL": "https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic",
+        "ANTHROPIC_MODEL": "qwen3.6-plus",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "qwen3.6-plus",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": "qwen3.6-plus",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": "qwen3.6-plus",
+        "CLAUDE_CODE_SUBAGENT_MODEL": "qwen3.6-plus"
+    },
+  "permissions": {
+    "allow": [
+      "Bash(java -version)",
+      "Bash(npm -v)",
+      "Bash(mvn -v)",
+      "Bash(mvn install *)",
+      "Bash(mvn spring-boot:run -Dspring-boot.run.jvmArguments=\"-Dfile.encoding=UTF-8\")",
+      "Bash(npm install *)",
+      "Bash(netstat -ano)",
+      "Bash(npx vite *)"
+    ]
+  }
+}

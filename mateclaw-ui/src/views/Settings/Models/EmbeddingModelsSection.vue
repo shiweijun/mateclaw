@@ -15,7 +15,7 @@
 
     <div v-if="loading" class="loading-state">加载中...</div>
     <div v-else-if="models.length === 0" class="empty-state">
-      暂无可用的 Embedding 模型。系统已预置 DashScope Text Embedding v3/v2，
+      暂无可用的 Embedding 模型。系统已预置 DashScope Text Embedding v4/v3/v2，
       请在"云端模型"下的 <strong>DashScope</strong> Provider 中配置 API Key。
     </div>
 

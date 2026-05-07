@@ -5,10 +5,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Component;
 import vip.mate.memory.event.ConversationCompletedEvent;
-import vip.mate.wiki.model.WikiKnowledgeBaseEntity;
 import vip.mate.wiki.service.WikiKnowledgeBaseService;
-
-import java.util.List;
+import vip.mate.agent.binding.service.AgentBindingService;
 
 /**
  * Wires the wiki hot-cache rebuild trigger into the existing event flow.
@@ -32,7 +30,7 @@ import java.util.List;
 public class HotCacheEventListener {
 
     private final HotCacheUpdateScheduler scheduler;
-    private final WikiKnowledgeBaseService kbService;
+    private final AgentBindingService agentBindingService;
 
     @EventListener
     public void onConversationEnd(ConversationCompletedEvent event) {
@@ -48,9 +46,9 @@ public class HotCacheEventListener {
 
     private Long resolvePrimaryKb(Long agentId) {
         try {
-            List<WikiKnowledgeBaseEntity> kbs = kbService.listByAgentId(agentId);
-            if (kbs.isEmpty()) return null;
-            return kbs.get(0).getId();
+            java.util.Set<Long> kbIds = agentBindingService.getBoundKbIds(agentId);
+            if (kbIds == null || kbIds.isEmpty()) return null;
+            return kbIds.iterator().next();
         } catch (Exception e) {
             log.debug("[HotCache] KB resolution failed for agent={}: {}", agentId, e.getMessage());
             return null;
