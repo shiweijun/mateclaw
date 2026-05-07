@@ -533,6 +533,21 @@ INSERT INTO mate_tool (id, name, display_name, description, tool_type, bean_name
 VALUES (1000000019, 'DocxRenderTool', 'DOCX Render', 'Render Markdown directly into a .docx and return a one-time download link. In-process Apache POI implementation, no Node.js subprocess; supports headings, bold, lists, tables. Preferred tool for creating new documents.', 'builtin', 'docxRenderTool', '📝', TRUE, TRUE, NOW(), NOW(), 0)
 ON DUPLICATE KEY UPDATE name=VALUES(name), display_name=VALUES(display_name), description=VALUES(description), tool_type=VALUES(tool_type), bean_name=VALUES(bean_name), icon=VALUES(icon), enabled=VALUES(enabled), builtin=VALUES(builtin), update_time=VALUES(update_time), deleted=VALUES(deleted);
 
+-- Built-in tool: XLSX Render (in-process Apache POI; markdown tables -> multi-sheet workbook)
+INSERT INTO mate_tool (id, name, display_name, description, tool_type, bean_name, icon, enabled, builtin, create_time, update_time, deleted)
+VALUES (1000000020, 'XlsxRenderTool', 'XLSX Render', 'Render Markdown directly into a .xlsx workbook and return a one-time download link. In-process Apache POI; each # heading becomes a sheet, pipe tables become rows, numeric cells auto-detected.', 'builtin', 'xlsxRenderTool', '📊', TRUE, TRUE, NOW(), NOW(), 0)
+ON DUPLICATE KEY UPDATE name=VALUES(name), display_name=VALUES(display_name), description=VALUES(description), tool_type=VALUES(tool_type), bean_name=VALUES(bean_name), icon=VALUES(icon), enabled=VALUES(enabled), builtin=VALUES(builtin), update_time=VALUES(update_time), deleted=VALUES(deleted);
+
+-- Built-in tool: PPTX Render (in-process Apache POI; Marp-style markdown -> .pptx deck)
+INSERT INTO mate_tool (id, name, display_name, description, tool_type, bean_name, icon, enabled, builtin, create_time, update_time, deleted)
+VALUES (1000000021, 'PptxRenderTool', 'PPTX Render', 'Render Marp-style Markdown directly into a .pptx deck and return a one-time download link. In-process Apache POI; --- separates slides, # / ## titles, - bullets, <!-- speaker notes -->.', 'builtin', 'pptxRenderTool', '🎞️', TRUE, TRUE, NOW(), NOW(), 0)
+ON DUPLICATE KEY UPDATE name=VALUES(name), display_name=VALUES(display_name), description=VALUES(description), tool_type=VALUES(tool_type), bean_name=VALUES(bean_name), icon=VALUES(icon), enabled=VALUES(enabled), builtin=VALUES(builtin), update_time=VALUES(update_time), deleted=VALUES(deleted);
+
+-- Built-in tool: PDF Render (dual backend: LibreOffice subprocess preferred, OpenPDF + Flying Saucer fallback)
+INSERT INTO mate_tool (id, name, display_name, description, tool_type, bean_name, icon, enabled, builtin, create_time, update_time, deleted)
+VALUES (1000000022, 'PdfRenderTool', 'PDF Render', 'Render Markdown into a final-form .pdf and return a one-time download link. Two backends (LibreOffice subprocess preferred, OpenPDF + Flying Saucer fallback); supports YAML frontmatter for cover / page header / page footer.', 'builtin', 'pdfRenderTool', '📄', TRUE, TRUE, NOW(), NOW(), 0)
+ON DUPLICATE KEY UPDATE name=VALUES(name), display_name=VALUES(display_name), description=VALUES(description), tool_type=VALUES(tool_type), bean_name=VALUES(bean_name), icon=VALUES(icon), enabled=VALUES(enabled), builtin=VALUES(builtin), update_time=VALUES(update_time), deleted=VALUES(deleted);
+
 -- Example MCP Server: Filesystem (see MateClaw docs mcpServers.filesystem)
 INSERT INTO mate_mcp_server (id, name, description, transport, url, headers_json, command, args_json, env_json, cwd,
     enabled, connect_timeout_seconds, read_timeout_seconds, last_status, last_error,

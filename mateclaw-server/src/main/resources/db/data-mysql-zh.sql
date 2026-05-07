@@ -531,6 +531,21 @@ INSERT INTO mate_tool (id, name, display_name, description, tool_type, bean_name
 VALUES (1000000019, 'DocxRenderTool', 'DOCX 渲染', '将 Markdown 直接渲染为 .docx 并返回一次性下载链接。进程内 Apache POI 实现，无需 Node.js 子进程；支持标题、加粗、列表、表格。新建文档场景的首选工具。', 'builtin', 'docxRenderTool', '📝', TRUE, TRUE, NOW(), NOW(), 0)
 ON DUPLICATE KEY UPDATE name=VALUES(name), display_name=VALUES(display_name), description=VALUES(description), tool_type=VALUES(tool_type), bean_name=VALUES(bean_name), icon=VALUES(icon), enabled=VALUES(enabled), builtin=VALUES(builtin), update_time=VALUES(update_time), deleted=VALUES(deleted);
 
+-- 内置工具：XLSX 渲染（进程内 Apache POI，从 Markdown 表格生成多 sheet 工作簿）
+INSERT INTO mate_tool (id, name, display_name, description, tool_type, bean_name, icon, enabled, builtin, create_time, update_time, deleted)
+VALUES (1000000020, 'XlsxRenderTool', 'XLSX 渲染', '将 Markdown 直接渲染为 .xlsx 工作簿并返回一次性下载链接。进程内 Apache POI 实现；每个 # 一级标题生成一个 sheet，竖线表格成为行内容，数字单元格自动识别。', 'builtin', 'xlsxRenderTool', '📊', TRUE, TRUE, NOW(), NOW(), 0)
+ON DUPLICATE KEY UPDATE name=VALUES(name), display_name=VALUES(display_name), description=VALUES(description), tool_type=VALUES(tool_type), bean_name=VALUES(bean_name), icon=VALUES(icon), enabled=VALUES(enabled), builtin=VALUES(builtin), update_time=VALUES(update_time), deleted=VALUES(deleted);
+
+-- 内置工具：PPTX 渲染（进程内 Apache POI，Marp 风格 Markdown 生成 .pptx）
+INSERT INTO mate_tool (id, name, display_name, description, tool_type, bean_name, icon, enabled, builtin, create_time, update_time, deleted)
+VALUES (1000000021, 'PptxRenderTool', 'PPTX 渲染', '将 Marp 风格的 Markdown 直接渲染为 .pptx 演示文稿并返回一次性下载链接。进程内 Apache POI 实现；--- 分页、# / ## 作幻灯片标题、- 作要点、<!-- ... --> 作演讲者备注。', 'builtin', 'pptxRenderTool', '🎞️', TRUE, TRUE, NOW(), NOW(), 0)
+ON DUPLICATE KEY UPDATE name=VALUES(name), display_name=VALUES(display_name), description=VALUES(description), tool_type=VALUES(tool_type), bean_name=VALUES(bean_name), icon=VALUES(icon), enabled=VALUES(enabled), builtin=VALUES(builtin), update_time=VALUES(update_time), deleted=VALUES(deleted);
+
+-- 内置工具：PDF 渲染（双 backend：LibreOffice 子进程优先，进程内 OpenPDF + Flying Saucer 兜底）
+INSERT INTO mate_tool (id, name, display_name, description, tool_type, bean_name, icon, enabled, builtin, create_time, update_time, deleted)
+VALUES (1000000022, 'PdfRenderTool', 'PDF 渲染', '将 Markdown 渲染为最终交付形态的 .pdf 并返回一次性下载链接。双 backend 自动切换（优先 LibreOffice，不可用时回落到进程内 OpenPDF + Flying Saucer）；通过 YAML frontmatter 控制封面、页眉、页脚。', 'builtin', 'pdfRenderTool', '📄', TRUE, TRUE, NOW(), NOW(), 0)
+ON DUPLICATE KEY UPDATE name=VALUES(name), display_name=VALUES(display_name), description=VALUES(description), tool_type=VALUES(tool_type), bean_name=VALUES(bean_name), icon=VALUES(icon), enabled=VALUES(enabled), builtin=VALUES(builtin), update_time=VALUES(update_time), deleted=VALUES(deleted);
+
 -- 示例 MCP Server：Filesystem（参考 MateClaw 文档中的 mcpServers.filesystem）
 INSERT INTO mate_mcp_server (
     id, name, description, transport, url, headers_json, command, args_json, env_json, cwd,

@@ -318,6 +318,12 @@ export const datasourceApi = {
 export const toolApi = {
   list: () => http.get('/tools'),
   listEnabled: () => http.get('/tools/enabled'),
+  /**
+   * Unified picker source for the agent edit tool tab — returns built-in
+   * tools plus every MCP-discovered tool grouped by server. The `name`
+   * field is what gets saved into mate_agent_tool.tool_name.
+   */
+  listAvailable: () => http.get('/tools/available'),
   get: (id: string | number) => http.get(`/tools/${id}`),
   create: (data: any) => http.post('/tools', data),
   update: (id: string | number, data: any) => http.put(`/tools/${id}`, data),
@@ -596,6 +602,8 @@ export const wikiApi = {
     http.delete(`/wiki/knowledge-bases/${kbId}/raw/${rawId}`),
   reprocessRaw: (kbId: number, rawId: number) =>
     http.post(`/wiki/knowledge-bases/${kbId}/raw/${rawId}/reprocess`),
+  cancelRaw: (kbId: number, rawId: number) =>
+    http.post(`/wiki/knowledge-bases/${kbId}/raw/${rawId}/cancel`),
   downloadRaw: (kbId: number, rawId: number) =>
     http.get<Blob>(`/wiki/knowledge-bases/${kbId}/raw/${rawId}/download`, {
       responseType: 'blob',
