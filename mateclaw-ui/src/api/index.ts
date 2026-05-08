@@ -53,7 +53,15 @@ http.interceptors.response.use(
     if (err.response?.status === 401) {
       handleAuthFailure()
     }
-    return Promise.reject(err.response?.data?.msg || err.message)
+    // Wrap as Error so consumers can read e.message uniformly, but preserve
+    // err.response so callers needing the structured payload (e.g. workflow
+    // compile errors → response.data.data.errors[]) can still reach it.
+    // The previous shape rejected with a bare string, which silently
+    // stripped the body and made 422-class errors look like "no response"
+    // on the publish/compile flows.
+    const wrapped = new Error(err.response?.data?.msg || err.message || 'Request failed')
+    ;(wrapped as Error & { response?: unknown }).response = err.response
+    return Promise.reject(wrapped)
   }
 )
 
@@ -769,4 +777,212 @@ export const hotCacheApi = {
   get: (kbId: number) => http.get<WikiHotCache | null>(`/wiki/hot-cache/${kbId}`),
   regenerate: (kbId: number) => http.post(`/wiki/hot-cache/${kbId}/regenerate`),
   reset: (kbId: number) => http.delete(`/wiki/hot-cache/${kbId}`),
+}
+
+// ==================== Workflow ====================
+
+export interface WorkflowSummary {
+  id: number
+  workspaceId: number
+  name: string
+  description?: string
+  enabled: boolean
+  draftJson?: string
+  draftUpdatedAt?: string
+  latestRevisionId?: number
+  createTime: string
+  updateTime: string
+}
+
+export interface WorkflowCompileError {
+  code: string
+  path: string
+  message: string
+}
+
+export interface WorkflowCompileFailure {
+  errorCount: number
+  errors: WorkflowCompileError[]
+}
+
+export interface WorkflowRun {
+  id: number
+  workflowId: number
+  revisionId: number
+  workspaceId: number
+  state: string
+  triggeredBy?: string
+  initialInputRef?: string
+  finalOutputRef?: string
+  errorMessage?: string
+  startedAt?: string
+  completedAt?: string
+}
+
+export interface WorkflowRunStep {
+  id: number
+  runId: number
+  stepIndex: number
+  iterationIndex?: number
+  stepName?: string
+  state: string
+  outputRef?: string
+  outputSummary?: string
+  outputContentType?: string
+  errorMessage?: string
+  durationMs?: number
+  startedAt?: string
+  completedAt?: string
+}
+
+/** Pause record carried inline on a paused run so the UI can resume
+ *  without a second roundtrip. Mirrors mate_workflow_run_pause. */
+export interface WorkflowRunPause {
+  id: number
+  runId: number
+  stepId?: number
+  pauseKind: string
+  pauseToken: string
+  externalApprovalId?: number
+  pausedAt: string
+  resumeDeadline?: string
+  resumePayloadRef?: string
+  resumedAt?: string
+  resumeOutcome?: string
+}
+
+export interface PausedRunSummary {
+  run: WorkflowRun
+  pause: WorkflowRunPause | null
+}
+
+export interface RunDetail {
+  run: WorkflowRun
+  steps: WorkflowRunStep[]
+  /** Most recent unresolved pause record; null when the run is not paused. */
+  activePause: WorkflowRunPause | null
+}
+
+export type ResumeOutcome = 'approved' | 'rejected' | 'timeout' | 'cancelled'
+
+export interface ResumeResponse {
+  kind: string
+  runId?: number | null
+  errorMessage?: string | null
+}
+
+export const workflowApi = {
+  list: (workspaceId: number) =>
+    http.get<WorkflowSummary[]>('/workflows', { params: { workspaceId } }),
+  get: (id: number) => http.get<WorkflowSummary>(`/workflows/${id}`),
+  create: (data: Partial<WorkflowSummary>) =>
+    http.post<WorkflowSummary>('/workflows', data),
+  update: (id: number, data: Partial<WorkflowSummary>) =>
+    http.put<WorkflowSummary>(`/workflows/${id}`, data),
+  delete: (id: number) => http.delete(`/workflows/${id}`),
+  saveDraft: (id: number, draftJson: string, userId?: number) =>
+    http.put(`/workflows/${id}/draft`, { draftJson }, { params: userId ? { userId } : {} }),
+  compile: (id: number) => http.post(`/workflows/${id}/compile`),
+  publish: (id: number, note?: string, userId?: number) =>
+    http.post(`/workflows/${id}/publish`,
+      note ? { note } : {},
+      { params: userId ? { userId } : {} }),
+  runs: (id: number, limit = 50) =>
+    http.get<WorkflowRun[]>(`/workflows/${id}/runs`, { params: { limit } }),
+  runDetail: (runId: number) =>
+    http.get<RunDetail>(`/workflows/runs/${runId}`),
+  /** List paused runs across the workspace so operators can resume them. */
+  listPausedRuns: (limit = 50) =>
+    http.get<PausedRunSummary[]>('/workflows/runs/paused', { params: { limit } }),
+  /** Resume a paused workflow run with one of the four documented outcomes. */
+  resumeRun: (runId: number, pauseToken: string, outcome: ResumeOutcome, payload?: string) =>
+    http.post<ResumeResponse>(`/workflows/runs/${runId}/resume`, {
+      pauseToken,
+      outcome,
+      payload,
+    }),
+  /** Generate a workflow draft from natural language. Returns the parsed
+   *  shape; the caller is responsible for creating a workflow row +
+   *  saving the draft if the user accepts it. */
+  generateDraft: (description: string) =>
+    http.post<GeneratedDraft>('/workflows/draft/generate', { description }),
+  /** Canonical workflow templates the generator can apply directly. */
+  listDraftTemplates: () =>
+    http.get<WorkflowDraftTemplate[]>('/workflows/draft/templates'),
+  /** Compile arbitrary draft JSON without persisting. Used by the template
+   *  picker / generator-result preview to give the operator the same compile
+   *  signal the existing /workflows/{id}/compile endpoint provides for saved
+   *  workflows. Resolves on success; rejects with an axios error whose
+   *  response.data.data carries the WorkflowCompileFailure on a 422. */
+  previewCompileDraft: (draftJson: string) =>
+    http.post('/workflows/draft/preview-compile', { draftJson }),
+}
+
+export interface GeneratedDraft {
+  name: string
+  description: string
+  draftJson: string
+  triggerDrafts: Array<Record<string, unknown>>
+  warnings: string[]
+  missingFields: string[]
+  confidence?: number | null
+  compileOk: boolean
+  compileErrors: WorkflowCompileError[]
+}
+
+export interface WorkflowDraftTemplate {
+  id: string
+  label: string
+  description: string
+  matchHints: string[]
+  draftJson: string
+  triggerDraftsJson: string
+}
+
+// ==================== Trigger ====================
+
+export interface TriggerSummary {
+  id: number
+  workspaceId: number
+  name?: string
+  patternType: string
+  patternJson: string
+  targetType: string
+  targetId: number
+  payloadTemplate?: string
+  rateLimitPerMin: number
+  dedupWindowSecs: number
+  botSelfFilter: boolean
+  enabled: boolean
+  fireCount: number
+  maxFires: number
+  lastFiredAt?: string
+  /** Stamp of the last dispatch attempt regardless of outcome (FIRED /
+   *  SKIPPED / FAILED). Distinguishes "never attempted" from
+   *  "attempted but the pre-flight skipped". */
+  lastDispatchedAt?: string
+  /** Most recent dispatch outcome message; null when the last attempt
+   *  fired cleanly. */
+  lastError?: string
+  patternVersion: number
+  createTime: string
+  updateTime: string
+}
+
+export const triggerApi = {
+  list: (workspaceId: number) =>
+    http.get<TriggerSummary[]>('/triggers', { params: { workspaceId } }),
+  get: (id: number) => http.get<TriggerSummary>(`/triggers/${id}`),
+  create: (data: Partial<TriggerSummary>) =>
+    http.post<TriggerSummary>('/triggers', data),
+  update: (id: number, data: Partial<TriggerSummary>) =>
+    http.put<TriggerSummary>(`/triggers/${id}`, data),
+  delete: (id: number) => http.delete(`/triggers/${id}`),
+  ingestEvent: (envelope: {
+    workspaceId: number
+    patternType: string
+    eventId?: string
+    senderId?: string
+    data?: Record<string, unknown>
+  }) => http.post('/triggers/events', envelope),
 }
