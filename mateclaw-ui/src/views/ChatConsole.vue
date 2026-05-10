@@ -286,6 +286,13 @@
         :lifecycle-stage="lifecycleStage"
       />
 
+      <!-- Multimodal routing hint: shown when pending attachments require a
+           modality the primary model lacks. -->
+      <MultimodalRoutingHint
+        :attachments="pendingAttachments"
+        :capabilities="agentCapabilities"
+      />
+
       <!-- 使用组件化的 ChatInput -->
       <ChatInput
         ref="chatInputRef"
@@ -351,6 +358,7 @@ import SkillIcon from '@/components/common/SkillIcon.vue'
 import { parsePrompt, deriveTagline } from '@/utils/agentPromptProfile'
 import { agentIconColor } from '@/utils/agentIconColor'
 import ChatInput from '@/components/chat/ChatInput.vue'
+import MultimodalRoutingHint from '@/components/chat/MultimodalRoutingHint.vue'
 import StreamLoadingBar from '@/components/chat/StreamLoadingBar.vue'
 import TalkMode from '@/components/chat/TalkMode.vue'
 import ModelSelector from '@/components/chat/ModelSelector.vue'
@@ -437,6 +445,11 @@ const providers = ref<ProviderInfo[]>([])
 const activeModels = ref<ActiveModelsInfo | null>(null)
 const pendingAttachments = ref<ChatAttachment[]>([])
 const uploadingAttachment = ref(false)
+
+// Per-agent capability snapshot for the multimodal routing hint above the
+// input box. Refetched whenever the active agent changes; cached locally to
+// avoid an extra request per attachment change.
+const agentCapabilities = ref<import('@/types').AgentCapabilities | null>(null)
 
 // 思考模式：只有两个状态 — 开或关
 const thinkingEnabled = ref(localStorage.getItem('mateclaw_thinking') !== 'off')
@@ -1134,6 +1147,19 @@ watch([selectedAgentId, currentConversationId], () => {
   syncRouteState()
 })
 
+// Refetch agent capabilities (modalities + sidecar config) on agent change so
+// the multimodal routing hint above the input box can react synchronously when
+// the user attaches an image / video.
+watch(selectedAgentId, async (id) => {
+  if (!id) { agentCapabilities.value = null; return }
+  try {
+    const res: any = await agentApi.getCapabilities(id)
+    agentCapabilities.value = res.data || null
+  } catch {
+    agentCapabilities.value = null
+  }
+}, { immediate: true })
+
 // ============ 方法 ============
 async function loadAgents() {
   try {
@@ -1774,6 +1800,8 @@ function normalizeMessage(raw: Message): Message {
   // 保留后端返回的 token 字段（MessageVO 新增）
   if ((raw as any).promptTokens) msg.promptTokens = (raw as any).promptTokens
   if ((raw as any).completionTokens) msg.completionTokens = (raw as any).completionTokens
+  if ((raw as any).runtimeModel) msg.runtimeModel = (raw as any).runtimeModel
+  if ((raw as any).runtimeProvider) msg.runtimeProvider = (raw as any).runtimeProvider
 
   if (msg.contentParts.length === 0 && msg.content) {
     if (msg.role === 'assistant') {
