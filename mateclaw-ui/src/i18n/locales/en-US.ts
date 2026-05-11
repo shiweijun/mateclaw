@@ -328,6 +328,19 @@ export default {
     // EVIDENCE_INSUFFICIENT info card (finishReason=evidence_insufficient)
     evidenceTitle: 'Run completed — some source references could not be verified',
     evidenceDescription: 'The full answer is preserved above. The classes/files listed in the trailing "[evidence insufficient] …" line were not actually opened during this run; the model may have inferred them from naming. Ask a follow-up to have each one read before relying on those references.',
+    // feedback_event card — emitted when a turn ends in a non-transient error.
+    // Buttons are data-driven from the event's `actions` array; labels live
+    // under chat.feedback.{action} so a future backend can ship a new action
+    // (e.g. "switch_model") with a single new translation key.
+    feedback: {
+      title: 'This turn failed',
+      description: 'The model call did not finish normally; the error reason is shown above. Click Retry to replay the same prompt, or Report to copy the error details for a bug report.',
+      retry: 'Retry',
+      regenerate: 'Regenerate',
+      report: 'Report',
+      reportCopied: 'Error details copied to clipboard',
+      reportFailed: 'Copy failed — check browser permissions',
+    },
     // Approval bar
     approvalAllow: 'Allow',
     approvalExecute: 'to execute?',
@@ -1759,6 +1772,22 @@ export default {
     knowledgeBases: 'Knowledge Bases',
     noKB: 'No knowledge bases yet',
     selectKB: 'Select a knowledge base',
+    library: {
+      countLabel: '{count} knowledge bases',
+      searchPlaceholder: 'Search knowledge bases...',
+      empty: 'No knowledge bases yet',
+      emptyHint: 'Click "New Knowledge Base" in the top right to start organizing your knowledge.',
+      noMatch: 'No matching knowledge bases',
+      open: 'Open',
+      pages: '{count} pages',
+      raws: '{count} materials',
+      noDescription: 'No description',
+      updatedAt: 'Updated {time}',
+      sortRecent: 'Recently updated',
+      sortName: 'Name',
+      sortPages: 'Pages',
+      backToLibrary: 'Back to library',
+    },
     selectPage: 'Select a page from the sidebar',
     pageKicker: 'Knowledge Page',
     confirmDelete: 'Delete page "{title}"? This cannot be undone.',
@@ -2047,7 +2076,7 @@ export default {
       publish: 'Publish',
       delete: 'Delete',
     },
-    bodyPlaceholder: '{"steps":[{"name":"step-a","agentId":1,"mode":{"type":"sequential"},"promptTemplate":"..."}]}',
+    bodyPlaceholder: '{\'{"steps":[{"name":"step-a","agentId":1,"mode":{"type":"sequential"},"promptTemplate":"..."}]}\'}',
     compileErrorsTitle: '{count} compile error(s)',
     templates: {
       label: 'Insert template',
@@ -2294,7 +2323,7 @@ export default {
       namePlaceholder: 'hourly-cleanup',
       patternType: 'Pattern type',
       patternJson: 'Pattern JSON',
-      patternJsonPlaceholder: '{"cron":"0 0 * * * *","timezone":"UTC"}',
+      patternJsonPlaceholder: '{\'{"cron":"0 0 * * * *","timezone":"UTC"}\'}',
       targetType: 'Target type',
       targetId: 'Target id',
       ratePerMin: 'Rate / min',
@@ -2302,7 +2331,7 @@ export default {
       maxFires: 'Max fires (0 = unlimited)',
       botSelfFilter: 'Bot-self filter (recommended)',
       payloadTemplate: 'Payload template (Pebble)',
-      payloadTemplatePlaceholder: '{"who":"{{ event.who }}"}',
+      payloadTemplatePlaceholder: '{\'{"who":"{{ event.who }}"}\'}',
       enabled: 'Enabled',
     },
     deleteConfirm: 'Delete trigger "{name}"?',

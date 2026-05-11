@@ -146,12 +146,18 @@ public class McpSkillBridge {
         s.setTags("mcp");
         s.setSecurityScanStatus("PASSED"); // MCP servers don't go through SkillSecurityService
         s.setConfigJson(buildConfigJson(server));
-        s.setManifestJson(serializeManifest(buildManifest(server)));
+        s.setManifestJson(serializeManifest(buildManifestFrom(server, readToolRawNames(server))));
         return s;
     }
 
     private ResolvedSkill serverToResolved(McpServerEntity server) {
-        SkillManifest manifest = buildManifest(server);
+        List<String> rawNames = readToolRawNames(server);
+        Map<String, String> toolDisplayNames = new LinkedHashMap<>();
+        for (String raw : rawNames) {
+            String prefixed = McpToolNameResolver.prefixedName(server.getId(), raw);
+            toolDisplayNames.put(prefixed, prefixed + " (" + raw + ")");
+        }
+        SkillManifest manifest = buildManifestFrom(server, rawNames);
         boolean connected = "connected".equalsIgnoreCase(nullSafe(server.getLastStatus()));
         boolean errored = "error".equalsIgnoreCase(nullSafe(server.getLastStatus()))
                 || (server.getLastError() != null && !server.getLastError().isBlank());
@@ -192,6 +198,7 @@ public class McpSkillBridge {
                 .manifest(manifest)
                 .featureStatuses(featureStatuses)
                 .activeFeatures(active)
+                .toolDisplayNames(toolDisplayNames)
                 .build();
     }
 
@@ -214,8 +221,7 @@ public class McpSkillBridge {
      * don't appear in any agent's callbacks at chat time, and the LLM
      * would see no MCP tools even though the bindings were saved.
      */
-    private SkillManifest buildManifest(McpServerEntity server) {
-        List<String> rawNames = readToolRawNames(server);
+    private SkillManifest buildManifestFrom(McpServerEntity server, List<String> rawNames) {
         List<String> toolNames = new ArrayList<>(rawNames.size());
         for (String raw : rawNames) {
             toolNames.add(McpToolNameResolver.prefixedName(server.getId(), raw));

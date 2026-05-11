@@ -328,6 +328,19 @@ export default {
     // EVIDENCE_INSUFFICIENT 提示卡（finishReason=evidence_insufficient）
     evidenceTitle: '任务已完成，但部分源码引用未被验证',
     evidenceDescription: '回答全文已保留并展示。底部「[证据不足] …」列出的类/文件并未在本次工具结果里被实际读取，模型可能基于命名推断。如需确认这些引用，请追问让模型逐一读取后再下结论。',
+    // feedback_event card — emitted when a turn ends in a non-transient error.
+    // Buttons are data-driven from the event's `actions` array; labels live
+    // under chat.feedback.{action} so a future backend can ship a new action
+    // (e.g. "switch_model") with a single new translation key.
+    feedback: {
+      title: '本次回答失败',
+      description: '模型调用未能正常完成，已显示错误原因。可点击「重试」让模型用同一条提问再试一次，或「上报问题」复制错误详情用于反馈。',
+      retry: '重试',
+      regenerate: '重新生成',
+      report: '上报问题',
+      reportCopied: '错误详情已复制到剪贴板',
+      reportFailed: '复制失败，请检查浏览器权限',
+    },
     // 审批栏
     approvalAllow: '允许',
     approvalExecute: '执行？',
@@ -1771,6 +1784,22 @@ export default {
     knowledgeBases: '知识库',
     noKB: '暂无知识库',
     selectKB: '请选择一个知识库',
+    library: {
+      countLabel: '{count} 个知识库',
+      searchPlaceholder: '搜索知识库...',
+      empty: '还没有知识库',
+      emptyHint: '点击右上角"新建知识库"开始组织你的知识',
+      noMatch: '没有匹配的知识库',
+      open: '进入',
+      pages: '{count} 页',
+      raws: '{count} 材料',
+      noDescription: '暂无描述',
+      updatedAt: '更新于 {time}',
+      sortRecent: '最近更新',
+      sortName: '名称',
+      sortPages: '页面数',
+      backToLibrary: '返回库',
+    },
     selectPage: '从左侧选择一个页面查看',
     pageKicker: '知识页面',
     confirmDelete: '确认删除页面「{title}」？此操作不可撤销。',
@@ -2059,7 +2088,7 @@ export default {
       publish: '发布',
       delete: '删除',
     },
-    bodyPlaceholder: '{"steps":[{"name":"step-a","agentId":1,"mode":{"type":"sequential"},"promptTemplate":"..."}]}',
+    bodyPlaceholder: '{\'{"steps":[{"name":"step-a","agentId":1,"mode":{"type":"sequential"},"promptTemplate":"..."}]}\'}',
     compileErrorsTitle: '{count} 条编译错误',
     templates: {
       label: '插入模板',
@@ -2306,7 +2335,7 @@ export default {
       namePlaceholder: 'hourly-cleanup',
       patternType: '模式类型',
       patternJson: '模式 JSON',
-      patternJsonPlaceholder: '{"cron":"0 0 * * * *","timezone":"UTC"}',
+      patternJsonPlaceholder: '{\'{"cron":"0 0 * * * *","timezone":"UTC"}\'}',
       targetType: '目标类型',
       targetId: '目标 ID',
       ratePerMin: '每分钟速率',
@@ -2314,7 +2343,7 @@ export default {
       maxFires: '最大触发数（0 = 不限）',
       botSelfFilter: 'Bot 自循环过滤（推荐）',
       payloadTemplate: '载荷模板（Pebble）',
-      payloadTemplatePlaceholder: '{"who":"{{ event.who }}"}',
+      payloadTemplatePlaceholder: '{\'{"who":"{{ event.who }}"}\'}',
       enabled: '启用',
     },
     deleteConfirm: '删除触发器「{name}」？',

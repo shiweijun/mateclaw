@@ -2,6 +2,7 @@
   <div class="mc-page-shell wiki-shell">
     <div class="mc-page-frame wiki-frame">
       <div class="mc-page-inner wiki-inner">
+<<<<<<< HEAD
         <div class="mc-page-header">
           <div>
             <div class="mc-page-kicker">{{ t('wiki.kicker') }}</div>
@@ -299,10 +300,23 @@
             </div>
           </div>
         </div>
+=======
+        <WikiLibrary
+          v-if="!store.currentKB"
+          :kbs="store.knowledgeBases"
+          :kb-stats="kbStats"
+          :loading="store.loading"
+          @open="enterKB"
+          @create="showCreateKB = true"
+        />
+        <WikiWorkspace
+          v-else
+          :kb="store.currentKB"
+        />
+>>>>>>> b7f69dbefed9ac24ed57b30672209027fcf3272b
       </div>
     </div>
 
-    <!-- Create KB Modal -->
     <div v-if="showCreateKB" class="modal-overlay" @click.self="showCreateKB = false">
       <div class="modal-content">
         <h3 class="modal-title">{{ t('wiki.createKB') }}</h3>
@@ -343,21 +357,16 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, watch, nextTick } from 'vue'
+import { ref, reactive, watch, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useWikiStore, isProtectedPage, type WikiPage } from '@/stores/useWikiStore'
+import { useWikiStore } from '@/stores/useWikiStore'
 import { wikiApi } from '@/api/index'
-import RawMaterialPanel from './components/RawMaterialPanel.vue'
-import WikiPageViewer from './components/WikiPageViewer.vue'
-import WikiConfig from './components/WikiConfig.vue'
-import WikiGraphView from './components/WikiGraphView.vue'
-import HotCachePanel from './components/HotCachePanel.vue'
+import WikiLibrary from './components/WikiLibrary.vue'
+import WikiWorkspace from './components/WikiWorkspace.vue'
 
 const { t } = useI18n()
 const store = useWikiStore()
-const pageListEl = ref<HTMLElement | null>(null)
 
-// KB health stats
 interface KBStats {
   pageCount: number
   enrichedPageCount: number
@@ -383,180 +392,18 @@ watch(() => store.knowledgeBases.length, () => {
 const showCreateKB = ref(false)
 const newKBName = ref('')
 const newKBDesc = ref('')
+<<<<<<< HEAD
 const showEditKB = ref(false)
 const editKBId = ref<number | null>(null)
 const editKBName = ref('')
 const editKBDesc = ref('')
 const activeTab = ref('raw')
 const pageSearch = ref('')
+=======
+>>>>>>> b7f69dbefed9ac24ed57b30672209027fcf3272b
 
-// Batch selection
-const batchMode = ref(false)
-const selectedSlugs = ref<string[]>([])
-
-// Pagination constants
-const PAGE_STEP = 20
-const searchPageLimit = ref(PAGE_STEP)
-
-// Per-group pagination limit map
-const groupPageLimit = reactive<Record<string, number>>({})
-
-// Which groups are collapsed
-const collapsedGroups = reactive<Set<string>>(new Set())
-
-// RFC-051 PR-7 follow-up: archived pages drawer state.
-const archivedOpen = ref(false)
-const archivedLoading = ref(false)
-const archivedPages = ref<WikiPage[]>([])
-
-async function toggleArchived() {
-  archivedOpen.value = !archivedOpen.value
-  if (archivedOpen.value && archivedPages.value.length === 0 && store.currentKB) {
-    archivedLoading.value = true
-    try {
-      const res: any = await wikiApi.listArchivedPages(store.currentKB.id)
-      archivedPages.value = (res?.data || res || []) as WikiPage[]
-    } catch (e) {
-      console.error('[Wiki] Failed to load archived pages', e)
-      archivedPages.value = []
-    } finally {
-      archivedLoading.value = false
-    }
-  }
-}
-
-async function restoreArchivedPage(slug: string) {
-  if (!store.currentKB) return
-  try {
-    await wikiApi.unarchivePage(store.currentKB.id, slug)
-    archivedPages.value = archivedPages.value.filter(p => p.slug !== slug)
-    // Bring the page back into the main list cache.
-    await store.fetchPages(store.currentKB.id)
-  } catch (e: any) {
-    console.error('[Wiki] Unarchive failed', e)
-    alert(e?.message || 'Unarchive failed')
-  }
-}
-
-// Reset archived drawer when KB changes so we re-fetch on first open in the new KB.
-watch(() => store.currentKB?.id, () => {
-  archivedOpen.value = false
-  archivedPages.value = []
-})
-
-function toggleGroup(type: string) {
-  if (collapsedGroups.has(type)) collapsedGroups.delete(type)
-  else collapsedGroups.add(type)
-}
-
-function loadMoreGroup(type: string) {
-  groupPageLimit[type] = (groupPageLimit[type] || PAGE_STEP) + PAGE_STEP
-}
-
-function paginatedGroupPages(group: { type: string; pages: any[] }) {
-  const limit = groupPageLimit[group.type] || PAGE_STEP
-  return group.pages.slice(0, limit)
-}
-
-function formatGroupLabel(type: string): string {
-  if (!type) return t('wiki.pageTypes.other')
-  const key = `wiki.pageTypes.${type.toLowerCase()}`
-  const translated = t(key)
-  // If i18n key not found it returns the key itself; fall back to capitalised type
-  return translated === key ? (type.charAt(0).toUpperCase() + type.slice(1)) : translated
-}
-
-// Type sort order
-const TYPE_ORDER = ['concept', 'technology', 'process', 'person', 'organization', 'product', 'place', 'event', 'term', 'other']
-
-const filteredPages = computed(() => {
-  const q = pageSearch.value.toLowerCase()
-  if (!q) return store.pages
-  return store.pages.filter(
-    (p) => p.title.toLowerCase().includes(q) || p.slug.toLowerCase().includes(q)
-  )
-})
-
-const paginatedSearch = computed(() => filteredPages.value.slice(0, searchPageLimit.value))
-
-const groupedPages = computed(() => {
-  const map = new Map<string, typeof store.pages>()
-  for (const page of store.pages) {
-    const type = (page.pageType || 'other').toLowerCase()
-    if (!map.has(type)) map.set(type, [])
-    map.get(type)!.push(page)
-  }
-  // Sort groups by TYPE_ORDER
-  return [...map.entries()]
-    .sort(([a], [b]) => {
-      const ia = TYPE_ORDER.indexOf(a) >= 0 ? TYPE_ORDER.indexOf(a) : 99
-      const ib = TYPE_ORDER.indexOf(b) >= 0 ? TYPE_ORDER.indexOf(b) : 99
-      return ia - ib
-    })
-    .map(([type, pages]) => ({ type, pages }))
-})
-
-// Reset pagination when KB changes
-watch(() => store.currentKB?.id, () => {
-  searchPageLimit.value = PAGE_STEP
-  Object.keys(groupPageLimit).forEach(k => delete groupPageLimit[k])
-  collapsedGroups.clear()
-})
-
-watch(() => pageSearch.value, () => {
-  searchPageLimit.value = PAGE_STEP
-})
-
-const allSelected = computed(() =>
-  filteredPages.value.length > 0 && selectedSlugs.value.length === filteredPages.value.length
-)
-
-function toggleSelect(slug: string) {
-  const idx = selectedSlugs.value.indexOf(slug)
-  if (idx >= 0) selectedSlugs.value.splice(idx, 1)
-  else selectedSlugs.value.push(slug)
-}
-
-function toggleSelectAll() {
-  if (allSelected.value) selectedSlugs.value = []
-  else selectedSlugs.value = filteredPages.value.map(p => p.slug)
-}
-
-function exitBatchMode() {
-  batchMode.value = false
-  selectedSlugs.value = []
-}
-
-async function handleBatchDelete() {
-  if (selectedSlugs.value.length === 0 || !store.currentKB) return
-  const confirmed = confirm(t('wiki.confirmBatchDelete', { count: selectedSlugs.value.length }))
-  if (!confirmed) return
-  try {
-    await wikiApi.batchDeletePages(store.currentKB.id, selectedSlugs.value)
-    exitBatchMode()
-    await store.fetchPages(store.currentKB.id)
-  } catch (e: any) {
-    alert(e?.message || 'Batch delete failed')
-  }
-}
-
-const tabs = computed(() => [
-  { key: 'raw', label: t('wiki.rawMaterials') },
-  { key: 'pages', label: t('wiki.pages') },
-  { key: 'graph', label: t('wiki.graph.tab') },
-  { key: 'config', label: t('wiki.config') },
-  { key: 'hotCache', label: t('wiki.hotCache.tab') },
-])
-
-async function selectKB(id: number) {
+async function enterKB(id: number) {
   await store.selectKB(id)
-  activeTab.value = 'raw'
-}
-
-async function openPage(slug: string) {
-  if (!store.currentKB) return
-  await store.loadPage(store.currentKB.id, slug)
-  activeTab.value = 'pages'
 }
 
 async function handleCreateKB() {
@@ -566,6 +413,7 @@ async function handleCreateKB() {
   newKBDesc.value = ''
 }
 
+<<<<<<< HEAD
 function openEditKB(kb: any) {
   editKBId.value = kb.id
   editKBName.value = kb.name || ''
@@ -606,6 +454,8 @@ function onPageListScroll() {
   }
 }
 
+=======
+>>>>>>> b7f69dbefed9ac24ed57b30672209027fcf3272b
 onMounted(() => {
   store.fetchKnowledgeBases()
 })
@@ -614,14 +464,15 @@ onMounted(() => {
 <style scoped>
 .wiki-shell { background: transparent; height: 100%; min-height: 0; overflow: hidden; }
 .wiki-frame { height: min(calc(100vh - 28px), 100%); min-height: 0; overflow: hidden; }
-.wiki-inner { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.wiki-inner { display: flex; flex-direction: column; height: 100%; min-height: 0; overflow-y: auto; }
 
-.btn-primary { display: flex; align-items: center; gap: 6px; padding: 10px 18px; background: linear-gradient(135deg, var(--mc-primary), var(--mc-primary-hover)); color: white; border: none; border-radius: 14px; font-size: 14px; font-weight: 600; cursor: pointer; box-shadow: var(--mc-shadow-soft); transition: opacity 0.15s; }
+.btn-primary { display: inline-flex; align-items: center; gap: 6px; padding: 10px 18px; background: linear-gradient(135deg, var(--mc-primary), var(--mc-primary-hover)); color: white; border: none; border-radius: 14px; font-size: 14px; font-weight: 600; cursor: pointer; box-shadow: var(--mc-shadow-soft); transition: opacity 0.15s; }
 .btn-primary:hover { opacity: 0.9; }
 .btn-primary:disabled { background: var(--mc-border); box-shadow: none; cursor: not-allowed; }
 .btn-secondary { padding: 8px 16px; background: var(--mc-bg-elevated); color: var(--mc-text-primary); border: 1px solid var(--mc-border); border-radius: 12px; font-size: 14px; cursor: pointer; transition: background 0.15s; }
 .btn-secondary:hover { background: var(--mc-bg-sunken); }
 
+<<<<<<< HEAD
 /* Layout */
 .wiki-layout { display: flex; gap: 16px; flex: 1; min-height: 0; overflow: hidden; }
 
@@ -939,6 +790,8 @@ onMounted(() => {
 .empty-state p { font-size: 14px; }
 
 /* Modal */
+=======
+>>>>>>> b7f69dbefed9ac24ed57b30672209027fcf3272b
 .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); backdrop-filter: blur(4px); display: flex; align-items: center; justify-content: center; z-index: 1000; padding: 20px; }
 .modal-content { background: var(--mc-bg-elevated); border: 1px solid var(--mc-border); border-radius: 18px; width: 100%; max-width: 520px; padding: 24px; box-shadow: 0 24px 64px rgba(0,0,0,0.18); }
 .modal-title { font-size: 17px; font-weight: 700; color: var(--mc-text-primary); margin: 0 0 18px; }
@@ -950,10 +803,5 @@ onMounted(() => {
 
 @media (max-width: 980px) {
   .wiki-frame { height: 100%; min-height: calc(100vh - 28px); }
-  .wiki-layout { flex-direction: column; overflow: visible; }
-  .wiki-sidebar { width: 100%; min-width: 0; max-height: 320px; }
-  .wiki-content { overflow: visible; }
-  .tab-content { overflow: visible; }
-  .tab-content--config { overflow: visible; }
 }
 </style>

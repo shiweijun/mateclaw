@@ -10,12 +10,12 @@
       <!-- Logo -->
       <div class="sidebar-logo">
         <div class="logo-icon">
-          <img src="/logo/mateclaw_logo_s.png" alt="MateClaw" class="logo-img" />
+          <img src="/logo/mateclaw_logo_s.png" alt="HydroClaw" class="logo-img" />
         </div>
         <transition name="fade">
           <div v-if="!effectiveCollapsed" class="logo-text">
-            <span class="logo-name">Mate<span class="logo-name-highlight">Claw</span></span>
-            <span class="logo-version">v{{ appVersion }}</span>
+            <span class="logo-name">Hydro<span class="logo-name-highlight">Claw</span></span>
+
           </div>
         </transition>
         <button
@@ -557,7 +557,7 @@ watch(() => workspaceStore.currentWorkspaceId, () => {
 
 .logo-name {
   display: block;
-  font-size: 16px;
+  font-size: 20px;
   font-weight: 800;
   color: var(--mc-sidebar-logo-name);
   white-space: nowrap;
