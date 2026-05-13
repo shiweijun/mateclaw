@@ -66,6 +66,24 @@ public class WikiTransformationEntity {
      */
     private String outputTarget;
 
+    /**
+     * Declared shape of the LLM output. {@code markdown} (default) accepts
+     * any text and stores it verbatim. {@code json} asks the LLM for a
+     * single JSON document; the executor parses it, retries once on parse
+     * failure, and marks the run failed if both attempts fail. JSON output
+     * is stored as a fenced ```json block in the run row so the existing
+     * markdown rendering path stays compatible.
+     */
+    private String outputFormat;
+
+    /**
+     * Optional JSON Schema text describing the expected shape when
+     * {@code outputFormat == 'json'}. Injected into the prompt verbatim
+     * so the LLM has explicit field expectations; the executor also runs
+     * a lightweight required-fields check after parsing.
+     */
+    private String outputSchema;
+
     @TableField(fill = FieldFill.INSERT)
     private LocalDateTime createTime;
 

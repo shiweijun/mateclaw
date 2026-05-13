@@ -11,6 +11,7 @@ import vip.mate.wiki.model.WikiKnowledgeBaseEntity;
 import vip.mate.wiki.model.WikiTransformationEntity;
 import vip.mate.wiki.model.WikiTransformationRunEntity;
 import vip.mate.wiki.service.WikiKnowledgeBaseService;
+import vip.mate.wiki.service.WikiTransformationAggregator;
 import vip.mate.wiki.service.WikiTransformationExecutor;
 import vip.mate.wiki.service.WikiTransformationService;
 import vip.mate.workspace.core.annotation.RequireWorkspaceRole;
@@ -34,6 +35,7 @@ public class WikiTransformationController {
 
     private final WikiTransformationService transformationService;
     private final WikiTransformationExecutor executor;
+    private final WikiTransformationAggregator aggregator;
     private final WikiKnowledgeBaseService kbService;
 
     // ==================== Templates ====================
@@ -102,10 +104,10 @@ public class WikiTransformationController {
     // ==================== Apply ====================
 
     @RequireWorkspaceRole("member")
-    @Operation(summary = "Run a transformation against a raw material",
-               description = "Set sync=true to block until the LLM call returns "
-                           + "(the response carries the populated run). "
-                           + "When false (default) the call returns immediately with the pending run row.")
+    @Operation(summary = "Run a transformation against a raw material or wiki page",
+               description = "Body accepts exactly one of {rawId, pageId}. Set sync=true to block "
+                           + "until the LLM call returns; when false (default) the call returns "
+                           + "immediately with the pending run row.")
     @PostMapping("/{id}/apply")
     public R<WikiTransformationRunEntity> apply(@PathVariable Long id,
                                                  @RequestBody Map<String, Object> body,
@@ -116,17 +118,54 @@ public class WikiTransformationController {
         verifyTemplateWorkspace(t, workspaceId);
 
         Object rawIdRaw = body == null ? null : body.get("rawId");
-        if (rawIdRaw == null) {
-            return R.fail("rawId is required");
+        Object pageIdRaw = body == null ? null : body.get("pageId");
+        if (rawIdRaw == null && pageIdRaw == null) {
+            return R.fail("One of rawId / pageId is required");
         }
-        Long rawId = Long.valueOf(rawIdRaw.toString());
+        if (rawIdRaw != null && pageIdRaw != null) {
+            return R.fail("Pass only one of rawId / pageId, not both");
+        }
 
-        if (sync) {
-            return R.ok(executor.runOnRawSync(t, rawId, "manual"));
+        if (rawIdRaw != null) {
+            Long rawId = Long.valueOf(rawIdRaw.toString());
+            if (sync) return R.ok(executor.runOnRawSync(t, rawId, "manual"));
+            executor.runOnRawAsync(t, rawId, "manual");
+        } else {
+            Long pageId = Long.valueOf(pageIdRaw.toString());
+            if (sync) return R.ok(executor.runOnPageSync(t, pageId, "manual"));
+            executor.runOnPageAsync(t, pageId, "manual");
         }
-        executor.runOnRawAsync(t, rawId, "manual");
-        // Async path — caller polls /runs to see the result land.
         return R.ok();
+    }
+
+    @RequireWorkspaceRole("member")
+    @Operation(summary = "Aggregate all completed runs of a template into one KB-level synthesis page",
+               description = "Map-reduces across every completed run of the template within the given KB. "
+                           + "Upserts the merged document at slug '<template-name>-aggregate'.")
+    @PostMapping("/{id}/aggregate")
+    public R<Map<String, Object>> aggregate(@PathVariable Long id,
+                                             @RequestParam Long kbId,
+                                             @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) {
+        WikiTransformationEntity t = transformationService.getById(id);
+        if (t == null) return R.fail("Transformation not found");
+        verifyTemplateWorkspace(t, workspaceId);
+        verifyKBWorkspace(kbId, workspaceId != null ? workspaceId : 1L);
+
+        try {
+            WikiTransformationAggregator.Result res = aggregator.aggregate(t, kbId, "manual");
+            if (res.pageId() == null) {
+                return R.fail(res.title()); // when sources are empty we put the reason in title field
+            }
+            return R.ok(Map.of(
+                    "pageId", res.pageId(),
+                    "slug", res.slug(),
+                    "title", res.title(),
+                    "sourcesUsed", res.sourcesUsed(),
+                    "charsFed", res.charsFed(),
+                    "created", res.created()));
+        } catch (IllegalStateException | IllegalArgumentException e) {
+            return R.fail(e.getMessage());
+        }
     }
 
     // ==================== Runs ====================
@@ -164,6 +203,22 @@ public class WikiTransformationController {
             return R.ok(transformationService.listRunsByKb(kbId, limit));
         }
         return R.fail("One of rawId / kbId / transformationId is required");
+    }
+
+    @RequireWorkspaceRole("member")
+    @Operation(summary = "Cancel a still-running transformation run",
+               description = "Marks the run as cancelled so the executor drops the eventual LLM output. "
+                           + "The HTTP request to the model continues server-side because most providers "
+                           + "do not support cancellation; this endpoint affects bookkeeping only.")
+    @PostMapping("/runs/{runId}/cancel")
+    public R<Void> cancelRun(@PathVariable Long runId,
+                              @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) {
+        WikiTransformationRunEntity run = transformationService.getRun(runId);
+        if (run == null) return R.fail("Run not found");
+        verifyKBWorkspace(run.getKbId(), workspaceId != null ? workspaceId : 1L);
+        boolean cancelled = executor.cancelRun(runId);
+        if (!cancelled) return R.fail("Run is not running");
+        return R.ok();
     }
 
     @RequireWorkspaceRole("member")

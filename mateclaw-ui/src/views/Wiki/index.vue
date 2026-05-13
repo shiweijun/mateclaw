@@ -2,7 +2,6 @@
   <div class="mc-page-shell wiki-shell">
     <div class="mc-page-frame wiki-frame">
       <div class="mc-page-inner wiki-inner">
-<<<<<<< HEAD
         <div class="mc-page-header">
           <div>
             <div class="mc-page-kicker">{{ t('wiki.kicker') }}</div>
@@ -300,7 +299,6 @@
             </div>
           </div>
         </div>
-=======
         <WikiLibrary
           v-if="!store.currentKB"
           :kbs="store.knowledgeBases"
@@ -313,7 +311,6 @@
           v-else
           :kb="store.currentKB"
         />
->>>>>>> b7f69dbefed9ac24ed57b30672209027fcf3272b
       </div>
     </div>
 
@@ -392,15 +389,13 @@ watch(() => store.knowledgeBases.length, () => {
 const showCreateKB = ref(false)
 const newKBName = ref('')
 const newKBDesc = ref('')
-<<<<<<< HEAD
+
 const showEditKB = ref(false)
 const editKBId = ref<number | null>(null)
 const editKBName = ref('')
 const editKBDesc = ref('')
 const activeTab = ref('raw')
 const pageSearch = ref('')
-=======
->>>>>>> b7f69dbefed9ac24ed57b30672209027fcf3272b
 
 async function enterKB(id: number) {
   await store.selectKB(id)
@@ -413,7 +408,6 @@ async function handleCreateKB() {
   newKBDesc.value = ''
 }
 
-<<<<<<< HEAD
 function openEditKB(kb: any) {
   editKBId.value = kb.id
   editKBName.value = kb.name || ''
@@ -454,8 +448,6 @@ function onPageListScroll() {
   }
 }
 
-=======
->>>>>>> b7f69dbefed9ac24ed57b30672209027fcf3272b
 onMounted(() => {
   store.fetchKnowledgeBases()
 })
@@ -472,7 +464,6 @@ onMounted(() => {
 .btn-secondary { padding: 8px 16px; background: var(--mc-bg-elevated); color: var(--mc-text-primary); border: 1px solid var(--mc-border); border-radius: 12px; font-size: 14px; cursor: pointer; transition: background 0.15s; }
 .btn-secondary:hover { background: var(--mc-bg-sunken); }
 
-<<<<<<< HEAD
 /* Layout */
 .wiki-layout { display: flex; gap: 16px; flex: 1; min-height: 0; overflow: hidden; }
 
@@ -790,8 +781,6 @@ onMounted(() => {
 .empty-state p { font-size: 14px; }
 
 /* Modal */
-=======
->>>>>>> b7f69dbefed9ac24ed57b30672209027fcf3272b
 .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); backdrop-filter: blur(4px); display: flex; align-items: center; justify-content: center; z-index: 1000; padding: 20px; }
 .modal-content { background: var(--mc-bg-elevated); border: 1px solid var(--mc-border); border-radius: 18px; width: 100%; max-width: 520px; padding: 24px; box-shadow: 0 24px 64px rgba(0,0,0,0.18); }
 .modal-title { font-size: 17px; font-weight: 700; color: var(--mc-text-primary); margin: 0 0 18px; }

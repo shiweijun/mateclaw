@@ -42,11 +42,20 @@ class WikiRawMaterialDedupTest {
         WikiProperties props = new WikiProperties();
         props.setAutoProcessOnUpload(false); // don't fire events during test
         DocumentExtractTool docTool = mock(DocumentExtractTool.class);
+<<<<<<< HEAD
         ImageVisionService imageVisionService = mock(ImageVisionService.class);
         PdfImageExtractor pdfImageExtractor = mock(PdfImageExtractor.class);
         FeatureFlagService featureFlagService = mock(FeatureFlagService.class);
 
         service = new WikiRawMaterialService(rawMapper, kbService, props, eventPublisher, docTool, chunkService, imageVisionService, pdfImageExtractor, featureFlagService);
+=======
+        ImageVisionService visionService = mock(ImageVisionService.class);
+        PdfImageExtractor pdfImageExtractor = mock(PdfImageExtractor.class);
+        FeatureFlagService featureFlagService = mock(FeatureFlagService.class);
+
+        service = new WikiRawMaterialService(rawMapper, kbService, props, eventPublisher, docTool,
+                chunkService, visionService, pdfImageExtractor, featureFlagService);
+>>>>>>> bcf194c35e8f068483aeeb510c119dfa543e8e46
     }
 
     private WikiRawMaterialEntity existingRow(Long id, String status) {

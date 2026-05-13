@@ -109,7 +109,6 @@ export const useWikiStore = defineStore('wiki', () => {
     }
   }
 
-<<<<<<< HEAD
   async function updateKB(id: number, data: { name?: string; description?: string }) {
     const res: any = await wikiApi.updateKB(id, data)
     const updated = res.data || res
@@ -120,14 +119,12 @@ export const useWikiStore = defineStore('wiki', () => {
     if (currentKB.value?.id === id) {
       currentKB.value = { ...currentKB.value, ...updated }
     }
-=======
   function backToLibrary() {
     currentKB.value = null
     currentPage.value = null
     rawMaterials.value = []
     pages.value = []
     selectedRawId.value = null
->>>>>>> b7f69dbefed9ac24ed57b30672209027fcf3272b
   }
 
   async function fetchRawMaterials(kbId: number) {
@@ -204,11 +201,8 @@ export const useWikiStore = defineStore('wiki', () => {
     selectKB,
     createKB,
     deleteKB,
-<<<<<<< HEAD
     updateKB,
-=======
     backToLibrary,
->>>>>>> b7f69dbefed9ac24ed57b30672209027fcf3272b
     fetchRawMaterials,
     fetchPages,
     filterPagesByRaw,
@@ -218,4 +212,4 @@ export const useWikiStore = defineStore('wiki', () => {
     uploadRawFile,
     scanDirectory,
   }
-})
+)

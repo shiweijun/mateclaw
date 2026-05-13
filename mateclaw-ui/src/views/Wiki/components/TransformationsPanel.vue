@@ -41,6 +41,15 @@
             <span v-if="tpl.outputTarget === 'page'" class="flag flag--on">
               {{ t('wiki.transformations.outputTargetPageBadge') }}
             </span>
+            <span v-if="tpl.outputFormat === 'json'" class="flag flag--scope">
+              {{ t('wiki.transformations.outputFormatJsonBadge') }}
+            </span>
+            <span v-if="tpl.outputSchema" class="flag flag--scope">
+              {{ t('wiki.transformations.outputSchemaBadge') }}
+            </span>
+            <span v-if="tpl.modelId" class="flag flag--scope">
+              {{ modelLabelFor(tpl.modelId) }}
+            </span>
             <span class="flag" :class="{ 'flag--muted': tpl.enabled === false }">
               {{ tpl.enabled === false ? t('wiki.transformations.disabled') : t('wiki.transformations.enabled') }}
             </span>
@@ -69,19 +78,49 @@
             <span v-if="runningTemplateId === tpl.id">{{ t('wiki.transformations.running') }}</span>
             <span v-else>{{ t('wiki.transformations.runApply') }}</span>
           </button>
+          <button class="btn-secondary"
+                  :disabled="aggregatingTemplateId === tpl.id"
+                  @click="onAggregate(tpl)">
+            {{ aggregatingTemplateId === tpl.id
+                ? t('wiki.transformations.aggregating')
+                : t('wiki.transformations.aggregateBtn') }}
+          </button>
           <button class="btn-secondary" @click="openEdit(tpl)">{{ t('wiki.transformations.editBtn') }}</button>
           <button class="btn-secondary btn-danger" @click="onDelete(tpl)">{{ t('wiki.transformations.deleteBtn') }}</button>
         </div>
 
         <div v-if="runsByTemplate[tpl.id]?.length" class="runs-list">
-          <div class="runs-title">{{ t('wiki.transformations.runs') }}</div>
+          <div class="runs-head-row">
+            <div class="runs-title">{{ t('wiki.transformations.runs') }}</div>
+            <button
+              v-if="selectedForCompare[tpl.id]?.length === 2"
+              class="btn-secondary btn-compare"
+              @click="openCompare(tpl)"
+            >
+              {{ t('wiki.transformations.compareBtn') }} ({{ selectedForCompare[tpl.id].length }})
+            </button>
+            <span v-else-if="selectedForCompare[tpl.id]?.length === 1" class="compare-hint">
+              {{ t('wiki.transformations.compareHint') }}
+            </span>
+          </div>
           <details v-for="run in runsByTemplate[tpl.id]" :key="run.id" class="run-item">
             <summary>
+              <input
+                v-if="run.status === 'completed'"
+                type="checkbox"
+                class="compare-check"
+                :checked="isSelectedForCompare(tpl.id, run.id)"
+                @click.stop="toggleCompareSelect(tpl.id, run.id)"
+                :title="t('wiki.transformations.compareCheckTip')"
+              />
               <span class="run-status" :class="`run-status--${run.status}`">{{ run.status }}</span>
               <span class="run-meta">
                 {{ rawTitleFor(run.rawId) }}
                 · {{ formatTimestamp(run.completedAt || run.startedAt || run.createTime) }}
                 · {{ formatDuration(run.durationMs) }}
+                <span v-if="run.totalTokens" class="run-tokens">
+                  · {{ formatTokens(run.inputTokens) }}↑ / {{ formatTokens(run.outputTokens) }}↓
+                </span>
               </span>
               <span v-if="run.outputPageId" class="run-saved-badge">
                 {{ t('wiki.transformations.savedAsPage') }} #{{ run.outputPageId }}
@@ -106,11 +145,36 @@
                 >
                   {{ t('wiki.transformations.openPage') }}
                 </button>
+                <button class="btn-secondary" :disabled="rerunningRunId === run.id" @click="onRerun(tpl, run)">
+                  {{ rerunningRunId === run.id
+                      ? t('wiki.transformations.rerunning')
+                      : t('wiki.transformations.rerunBtn') }}
+                </button>
               </div>
               <div class="run-output">{{ run.output }}</div>
             </template>
-            <div v-else-if="run.status === 'failed'" class="run-error">{{ run.error }}</div>
-            <div v-else class="run-output run-output--muted">{{ t('wiki.transformations.running') }}</div>
+            <template v-else-if="run.status === 'failed' || run.status === 'cancelled'">
+              <div class="run-actions">
+                <button class="btn-secondary" :disabled="rerunningRunId === run.id" @click="onRerun(tpl, run)">
+                  {{ rerunningRunId === run.id
+                      ? t('wiki.transformations.rerunning')
+                      : t('wiki.transformations.rerunBtn') }}
+                </button>
+              </div>
+              <div class="run-error">{{ run.error }}</div>
+            </template>
+            <template v-else>
+              <div class="run-actions">
+                <button class="btn-secondary btn-danger"
+                        :disabled="cancellingRunId === run.id"
+                        @click="onCancelRun(tpl, run)">
+                  {{ cancellingRunId === run.id
+                      ? t('wiki.transformations.cancelling')
+                      : t('wiki.transformations.cancelRunBtn') }}
+                </button>
+              </div>
+              <div class="run-output run-output--muted">{{ t('wiki.transformations.running') }}</div>
+            </template>
           </details>
         </div>
       </article>
@@ -155,6 +219,17 @@
           </label>
 
           <label class="field">
+            <span class="field-label">{{ t('wiki.transformations.modelLabel') }}</span>
+            <select v-model="form.modelId" class="field-input">
+              <option :value="null">{{ t('wiki.transformations.modelDefault') }}</option>
+              <option v-for="m in availableModels" :key="m.id" :value="m.id">
+                {{ m.name }} <span v-if="m.provider"> · {{ m.provider }}</span>
+              </option>
+            </select>
+            <span class="field-hint">{{ t('wiki.transformations.modelHelp') }}</span>
+          </label>
+
+          <label class="field">
             <span class="field-label">{{ t('wiki.transformations.prompt') }}</span>
             <textarea
               v-model="form.promptTemplate"
@@ -186,6 +261,29 @@
               <span>{{ t('wiki.transformations.outputTargetPage') }}</span>
             </label>
           </fieldset>
+
+          <fieldset class="field field--group">
+            <legend class="field-label">{{ t('wiki.transformations.outputFormatLabel') }}</legend>
+            <label class="radio-row">
+              <input type="radio" value="markdown" v-model="form.outputFormat" />
+              <span>{{ t('wiki.transformations.outputFormatMarkdown') }}</span>
+            </label>
+            <label class="radio-row">
+              <input type="radio" value="json" v-model="form.outputFormat" />
+              <span>{{ t('wiki.transformations.outputFormatJson') }}</span>
+            </label>
+          </fieldset>
+
+          <label v-if="form.outputFormat === 'json'" class="field">
+            <span class="field-label">{{ t('wiki.transformations.outputSchemaLabel') }}</span>
+            <textarea
+              v-model="form.outputSchema"
+              class="field-textarea"
+              rows="8"
+              :placeholder="t('wiki.transformations.outputSchemaPlaceholder')"
+            ></textarea>
+            <span class="field-hint">{{ t('wiki.transformations.outputSchemaHelp') }}</span>
+          </label>
         </div>
 
         <div class="modal-actions">
@@ -193,6 +291,39 @@
           <button class="btn-primary" :disabled="saving" @click="onSave">
             {{ saving ? t('common.loading') : t('wiki.transformations.saveBtn') }}
           </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Compare modal: shows two completed runs side-by-side. -->
+    <div v-if="compareOpen" class="modal-overlay" @click.self="closeCompare">
+      <div class="modal modal--compare">
+        <div class="modal-head">
+          <h3>{{ t('wiki.transformations.compareTitle') }}</h3>
+          <button class="modal-close" @click="closeCompare">×</button>
+        </div>
+        <div class="modal-body compare-body">
+          <article v-for="(run, idx) in compareRuns" :key="run?.id ?? idx" class="compare-col">
+            <header class="compare-col-head">
+              <div class="compare-col-title">Run #{{ run?.id }}</div>
+              <div class="compare-col-meta">
+                <span>{{ formatTimestamp(run?.completedAt || run?.startedAt || run?.createTime || null) }}</span>
+                <span class="dot"></span>
+                <span>{{ formatDuration(run?.durationMs ?? null) }}</span>
+                <span v-if="run?.totalTokens" class="dot"></span>
+                <span v-if="run?.totalTokens">
+                  {{ formatTokens(run.inputTokens) }}↑ / {{ formatTokens(run.outputTokens) }}↓
+                </span>
+              </div>
+              <div class="compare-col-source">
+                {{ run?.inputKind === 'page' ? 'page' : 'raw' }} · {{ run?.rawId != null ? rawTitleFor(run.rawId) : ('page#' + run?.pageId) }}
+              </div>
+            </header>
+            <pre class="compare-col-output">{{ run?.output ?? '' }}</pre>
+          </article>
+        </div>
+        <div class="modal-actions">
+          <button class="btn-secondary" @click="closeCompare">{{ t('wiki.transformations.cancelBtn') }}</button>
         </div>
       </div>
     </div>
@@ -204,7 +335,7 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElIcon, ElMessage } from 'element-plus'
 import { Loading, WarningFilled } from '@element-plus/icons-vue'
-import { wikiApi } from '@/api/index'
+import { wikiApi, modelApi } from '@/api/index'
 import { useWikiStore, type WikiRawMaterial } from '@/stores/useWikiStore'
 
 interface WikiTransformation {
@@ -219,6 +350,8 @@ interface WikiTransformation {
   enabled: boolean
   modelId: number | null
   outputTarget: 'none' | 'page' | null
+  outputFormat: 'markdown' | 'json' | null
+  outputSchema: string | null
 }
 
 interface WikiTransformationRun {
@@ -228,7 +361,7 @@ interface WikiTransformationRun {
   rawId: number | null
   pageId: number | null
   inputKind: string
-  status: 'pending' | 'running' | 'completed' | 'failed'
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
   output: string | null
   error: string | null
   durationMs: number | null
@@ -237,6 +370,9 @@ interface WikiTransformationRun {
   createTime: string
   triggeredBy: string
   outputPageId: number | null
+  inputTokens: number | null
+  outputTokens: number | null
+  totalTokens: number | null
 }
 
 const { t } = useI18n()
@@ -254,6 +390,16 @@ const editorOpen = ref(false)
 const editing = ref<WikiTransformation | null>(null)
 const saving = ref(false)
 const savingRunId = ref<number | null>(null)
+const cancellingRunId = ref<number | null>(null)
+const rerunningRunId = ref<number | null>(null)
+const aggregatingTemplateId = ref<number | null>(null)
+// Map of templateId → up-to-2 run IDs the user has ticked for side-by-side compare.
+const selectedForCompare = ref<Record<number, number[]>>({})
+const compareOpen = ref(false)
+const compareRuns = ref<(WikiTransformationRun | undefined)[]>([])
+interface ModelOption { id: number; name: string; provider: string; modelName: string }
+const availableModels = ref<ModelOption[]>([])
+
 const form = reactive<{
   name: string
   title: string
@@ -262,6 +408,9 @@ const form = reactive<{
   applyDefault: boolean
   enabled: boolean
   outputTarget: 'none' | 'page'
+  outputFormat: 'markdown' | 'json'
+  outputSchema: string
+  modelId: number | null
 }>({
   name: '',
   title: '',
@@ -270,6 +419,9 @@ const form = reactive<{
   applyDefault: false,
   enabled: true,
   outputTarget: 'none',
+  outputFormat: 'markdown',
+  outputSchema: '',
+  modelId: null,
 })
 
 const completedRaws = computed<WikiRawMaterial[]>(() =>
@@ -284,6 +436,12 @@ function rawTitleFor(rawId: number | null): string {
   return r?.title || `raw#${rawId}`
 }
 
+function modelLabelFor(modelId: number | null | undefined): string {
+  if (modelId == null) return ''
+  const m = availableModels.value.find((x) => x.id === modelId)
+  return m ? m.name : `model#${modelId}`
+}
+
 function formatTimestamp(iso: string | null): string {
   if (!iso) return '—'
   return new Date(iso).toLocaleString()
@@ -293,6 +451,13 @@ function formatDuration(ms: number | null): string {
   if (ms == null) return '—'
   if (ms < 1000) return `${ms}ms`
   return `${(ms / 1000).toFixed(1)}s`
+}
+
+function formatTokens(n: number | null): string {
+  if (n == null) return '—'
+  if (n < 1000) return String(n)
+  if (n < 1_000_000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k'
+  return (n / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'm'
 }
 
 async function loadAll() {
@@ -305,7 +470,10 @@ async function loadAll() {
     selectedRawByTemplate.value = Object.fromEntries(
       templates.value.map((t) => [t.id, selectedRawByTemplate.value[t.id] ?? null])
     )
-    await Promise.all(templates.value.map((tpl) => loadRunsFor(tpl.id)))
+    await Promise.all([
+      ensureModelsLoaded(),
+      ...templates.value.map((tpl) => loadRunsFor(tpl.id)),
+    ])
   } catch (e: any) {
     error.value = e?.message ?? String(e)
   } finally {
@@ -322,6 +490,21 @@ async function loadRunsFor(templateId: number) {
   }
 }
 
+async function ensureModelsLoaded() {
+  if (availableModels.value.length > 0) return
+  try {
+    const res: any = await modelApi.listEnabled()
+    availableModels.value = (res?.data || []).map((m: any) => ({
+      id: m.id,
+      name: m.name,
+      provider: m.provider,
+      modelName: m.modelName,
+    }))
+  } catch {
+    // Empty list = picker only offers "default".
+  }
+}
+
 function openCreate() {
   editing.value = null
   form.name = ''
@@ -331,7 +514,11 @@ function openCreate() {
   form.applyDefault = false
   form.enabled = true
   form.outputTarget = 'none'
+  form.outputFormat = 'markdown'
+  form.outputSchema = ''
+  form.modelId = null
   editorOpen.value = true
+  ensureModelsLoaded()
 }
 
 function openEdit(tpl: WikiTransformation) {
@@ -343,7 +530,11 @@ function openEdit(tpl: WikiTransformation) {
   form.applyDefault = tpl.applyDefault
   form.enabled = tpl.enabled !== false
   form.outputTarget = tpl.outputTarget === 'page' ? 'page' : 'none'
+  form.outputFormat = tpl.outputFormat === 'json' ? 'json' : 'markdown'
+  form.outputSchema = tpl.outputSchema || ''
+  form.modelId = tpl.modelId ?? null
   editorOpen.value = true
+  ensureModelsLoaded()
 }
 
 function closeEditor() {
@@ -359,7 +550,12 @@ async function onSave() {
   }
   saving.value = true
   try {
+    // Schema is only persisted when format=json; otherwise we always send
+    // an empty string so the backend can clear a previously-stored value.
+    const schemaPayload = form.outputFormat === 'json' ? form.outputSchema.trim() : ''
     if (editing.value) {
+      // Update path: backend treats `-1` as "clear modelId"; null is skipped.
+      const updateModelId = form.modelId == null ? -1 : form.modelId
       await wikiApi.updateTransformation(editing.value.id, {
         title: form.title,
         description: form.description,
@@ -367,6 +563,9 @@ async function onSave() {
         applyDefault: form.applyDefault,
         enabled: form.enabled,
         outputTarget: form.outputTarget,
+        outputFormat: form.outputFormat,
+        outputSchema: schemaPayload,
+        modelId: updateModelId,
       })
     } else {
       await wikiApi.createTransformation({
@@ -378,6 +577,9 @@ async function onSave() {
         applyDefault: form.applyDefault,
         enabled: form.enabled,
         outputTarget: form.outputTarget,
+        outputFormat: form.outputFormat,
+        outputSchema: schemaPayload || null,
+        modelId: form.modelId,
       })
     }
     closeEditor()
@@ -433,6 +635,90 @@ async function onSaveRunAsPage(tpl: WikiTransformation, run: WikiTransformationR
     ElMessage.error(e?.message ?? t('wiki.transformations.saveAsPageFailed'))
   } finally {
     savingRunId.value = null
+  }
+}
+
+function isSelectedForCompare(tplId: number, runId: number): boolean {
+  return (selectedForCompare.value[tplId] || []).includes(runId)
+}
+
+function toggleCompareSelect(tplId: number, runId: number) {
+  const existing = selectedForCompare.value[tplId] || []
+  if (existing.includes(runId)) {
+    selectedForCompare.value[tplId] = existing.filter((id) => id !== runId)
+    return
+  }
+  if (existing.length >= 2) {
+    // Sliding window: drop the oldest selection to make room for the new pick.
+    selectedForCompare.value[tplId] = [existing[1], runId]
+  } else {
+    selectedForCompare.value[tplId] = [...existing, runId]
+  }
+}
+
+function openCompare(tpl: WikiTransformation) {
+  const ids = selectedForCompare.value[tpl.id] || []
+  if (ids.length !== 2) return
+  const runs = runsByTemplate.value[tpl.id] || []
+  // Order chronologically (older first) so left = before, right = after.
+  const picked = ids
+    .map((id) => runs.find((r) => r.id === id))
+    .filter((r): r is WikiTransformationRun => !!r)
+    .sort((a, b) => new Date(a.createTime).getTime() - new Date(b.createTime).getTime())
+  if (picked.length !== 2) return
+  compareRuns.value = picked
+  compareOpen.value = true
+}
+
+function closeCompare() {
+  compareOpen.value = false
+  compareRuns.value = []
+}
+
+async function onAggregate(tpl: WikiTransformation) {
+  if (!store.currentKB) return
+  aggregatingTemplateId.value = tpl.id
+  try {
+    const resp: any = await wikiApi.aggregateTransformation(tpl.id, store.currentKB.id)
+    const payload = resp?.data ?? {}
+    if (payload && payload.pageId) {
+      ElMessage.success(`${t('wiki.transformations.aggregateDone')} · ${payload.sourcesUsed} sources`)
+      // Refresh the page list in the wiki store so the new aggregate page
+      // shows up in the sidebar without a manual reload.
+      try { await store.fetchPages(store.currentKB.id) } catch {}
+    } else {
+      ElMessage.info(t('wiki.transformations.aggregateNoRuns'))
+    }
+  } catch (e: any) {
+    ElMessage.error(e?.message ?? t('wiki.transformations.aggregateFailed'))
+  } finally {
+    aggregatingTemplateId.value = null
+  }
+}
+
+async function onCancelRun(tpl: WikiTransformation, run: WikiTransformationRun) {
+  cancellingRunId.value = run.id
+  try {
+    await wikiApi.cancelTransformationRun(run.id)
+    ElMessage.success(t('wiki.transformations.cancelDone'))
+    await loadRunsFor(tpl.id)
+  } catch (e: any) {
+    ElMessage.error(e?.message ?? t('wiki.transformations.cancelFailed'))
+  } finally {
+    cancellingRunId.value = null
+  }
+}
+
+async function onRerun(tpl: WikiTransformation, run: WikiTransformationRun) {
+  if (!run.rawId) return
+  rerunningRunId.value = run.id
+  try {
+    await wikiApi.applyTransformation(tpl.id, run.rawId, true)
+    await loadRunsFor(tpl.id)
+  } catch (e: any) {
+    ElMessage.error(e?.message ?? t('wiki.transformations.runFailed'))
+  } finally {
+    rerunningRunId.value = null
   }
 }
 
@@ -568,7 +854,11 @@ onMounted(async () => {
 }
 
 .runs-list { display: flex; flex-direction: column; gap: 6px; padding-top: 8px; border-top: 1px dashed var(--mc-border-light); }
-.runs-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--mc-text-tertiary); }
+.runs-head-row { display: flex; align-items: center; gap: 10px; }
+.runs-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--mc-text-tertiary); flex: 1; }
+.btn-compare { font-size: 12px; padding: 4px 12px; }
+.compare-hint { font-size: 11px; color: var(--mc-text-tertiary); }
+.compare-check { margin-right: 6px; accent-color: var(--mc-primary); cursor: pointer; }
 .run-item summary {
   cursor: pointer;
   display: flex;
@@ -589,7 +879,9 @@ onMounted(async () => {
 .run-status--completed { background: var(--el-color-success-light-9); color: var(--el-color-success); }
 .run-status--failed { background: var(--el-color-danger-light-9); color: var(--el-color-danger); }
 .run-status--running, .run-status--pending { background: var(--mc-bg-muted); color: var(--mc-text-secondary); }
+.run-status--cancelled { background: var(--mc-bg-muted); color: var(--mc-text-tertiary); }
 .run-meta { color: var(--mc-text-tertiary); }
+.run-tokens { color: var(--mc-text-tertiary); font-family: var(--mc-font-mono, ui-monospace, Menlo, monospace); font-size: 11px; }
 .run-output {
   margin-top: 6px;
   padding: 10px 12px;
@@ -644,6 +936,40 @@ onMounted(async () => {
   max-height: 90vh;
   overflow: hidden;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
+}
+.modal--compare { width: min(1200px, 96vw); }
+.compare-body { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 14px 16px; overflow-y: auto; }
+.compare-col { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.compare-col-head {
+  background: var(--mc-bg-muted);
+  border: 1px solid var(--mc-border-light);
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.compare-col-title { font-size: 13px; font-weight: 600; color: var(--mc-text-primary); }
+.compare-col-meta { font-size: 11px; color: var(--mc-text-secondary); display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.compare-col-source { font-size: 11px; color: var(--mc-text-tertiary); font-family: var(--mc-font-mono, ui-monospace, Menlo, monospace); }
+.compare-col-output {
+  flex: 1;
+  margin: 0;
+  padding: 12px 14px;
+  background: var(--mc-bg);
+  border: 1px solid var(--mc-border-light);
+  border-radius: 10px;
+  font-family: var(--mc-font-mono, ui-monospace, Menlo, monospace);
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--mc-text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow: auto;
+  min-height: 360px;
+}
+@media (max-width: 900px) {
+  .compare-body { grid-template-columns: 1fr; }
 }
 .modal-head {
   display: flex;

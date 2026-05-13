@@ -38,12 +38,21 @@ class WikiRawMaterialRecoveryTest {
         eventPublisher = mock(ApplicationEventPublisher.class);
         WikiChunkService chunkService = mock(WikiChunkService.class);
         DocumentExtractTool docTool = mock(DocumentExtractTool.class);
+<<<<<<< HEAD
         ImageVisionService imageVisionService = mock(ImageVisionService.class);
+=======
+        ImageVisionService visionService = mock(ImageVisionService.class);
+>>>>>>> bcf194c35e8f068483aeeb510c119dfa543e8e46
         PdfImageExtractor pdfImageExtractor = mock(PdfImageExtractor.class);
         FeatureFlagService featureFlagService = mock(FeatureFlagService.class);
         props = new WikiProperties();
         props.setAutoProcessOnUpload(true);
+<<<<<<< HEAD
         service = new WikiRawMaterialService(rawMapper, kbService, props, eventPublisher, docTool, chunkService, imageVisionService, pdfImageExtractor, featureFlagService);
+=======
+        service = new WikiRawMaterialService(rawMapper, kbService, props, eventPublisher, docTool,
+                chunkService, visionService, pdfImageExtractor, featureFlagService);
+>>>>>>> bcf194c35e8f068483aeeb510c119dfa543e8e46
     }
 
     private WikiRawMaterialEntity stuckRow(Long id, Long kbId) {

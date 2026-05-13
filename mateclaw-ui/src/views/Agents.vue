@@ -323,22 +323,31 @@
             </div>
             <p class="binding-hint">{{ t('agents.binding.skillsHint') }}</p>
             <div v-if="availableSkills.length === 0" class="binding-empty">{{ t('agents.binding.noSkills') }}</div>
-            <div v-else class="binding-list">
-              <label
-                v-for="skill in availableSkills"
-                :key="skill.id"
-                class="binding-item"
-                :class="{ selected: selectedSkillIds.includes(skill.id) }"
-              >
-                <input type="checkbox" :value="skill.id" v-model="selectedSkillIds" class="binding-checkbox" />
-                <span class="binding-icon"><SkillIcon :value="skill.icon" :size="20" :fallback="'🧩'" /></span>
-                <div class="binding-info">
-                  <span class="binding-name">{{ skill.name }}</span>
-                  <span v-if="skill.description" class="binding-desc">{{ skill.description?.slice(0, 80) }}</span>
-                </div>
-                <span v-if="skill.version" class="binding-version">v{{ skill.version }}</span>
-              </label>
-            </div>
+            <template v-else>
+              <div class="binding-search">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                </svg>
+                <input v-model="skillBindingSearch" :placeholder="t('agents.binding.searchSkills')" />
+              </div>
+              <div v-if="filteredAvailableSkills.length === 0" class="binding-empty binding-empty--compact">{{ t('agents.binding.noMatchingSkills') }}</div>
+              <div v-else class="binding-list">
+                <label
+                  v-for="skill in filteredAvailableSkills"
+                  :key="skill.id"
+                  class="binding-item"
+                  :class="{ selected: selectedSkillIds.includes(skill.id) }"
+                >
+                  <input type="checkbox" :value="skill.id" v-model="selectedSkillIds" class="binding-checkbox" />
+                  <span class="binding-icon"><SkillIcon :value="skill.icon" :size="20" :fallback="'🧩'" /></span>
+                  <div class="binding-info">
+                    <span class="binding-name">{{ skill.name }}</span>
+                    <span v-if="skill.description" class="binding-desc">{{ skill.description?.slice(0, 80) }}</span>
+                  </div>
+                  <span v-if="skill.version" class="binding-version">v{{ skill.version }}</span>
+                </label>
+              </div>
+            </template>
           </div>
 
           <!-- Knowledge Bases Tab -->
@@ -386,6 +395,12 @@
               <p class="binding-hint">{{ t('agents.binding.toolsHint') }}</p>
               <p class="binding-hint advanced-tools-note">{{ t('agents.binding.advancedToolsHint') }}</p>
               <p class="binding-hint advanced-tools-note">{{ t('agents.binding.toolUnionHint') }}</p>
+              <div v-if="availableToolGroups.length > 0" class="binding-search">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                </svg>
+                <input v-model="toolBindingSearch" :placeholder="t('agents.binding.searchTools')" />
+              </div>
               <!-- Render the empty state only when there is genuinely
                    nothing to show. availableTools can be empty while
                    availableToolGroups still contains a synthesized
@@ -393,8 +408,9 @@
                    of the catalog) — that case must reach the list so
                    the user can clean those orphans up. -->
               <div v-if="availableToolGroups.length === 0" class="binding-empty">{{ t('agents.binding.noTools') }}</div>
+              <div v-else-if="filteredAvailableToolGroups.length === 0" class="binding-empty binding-empty--compact">{{ t('agents.binding.noMatchingTools') }}</div>
               <div v-else class="binding-list">
-                <template v-for="group in availableToolGroups" :key="group.groupId">
+                <template v-for="group in filteredAvailableToolGroups" :key="group.groupId">
                   <div class="binding-group-header">{{ group.label }}</div>
                   <label
                     v-for="tool in group.tools"
@@ -502,6 +518,7 @@ import {
   type AgentPromptProfile,
 } from '@/utils/agentPromptProfile'
 import { agentIconColor } from '@/utils/agentIconColor'
+import { filterAgentBindingItems, filterAgentToolGroups } from '@/utils/agentBindingSearch'
 
 const router = useRouter()
 const { t } = useI18n()
@@ -519,6 +536,10 @@ const advancedToolsOpen = ref(false)
 // Binding state
 const availableSkills = ref<any[]>([])
 const availableTools = ref<any[]>([])
+const skillBindingSearch = ref('')
+const toolBindingSearch = ref('')
+
+const filteredAvailableSkills = computed(() => filterAgentBindingItems(availableSkills.value, skillBindingSearch.value))
 
 /**
  * Group the flat /tools/available payload by source so the picker
@@ -613,6 +634,8 @@ const availableToolGroups = computed(() => {
   }
   return order.map((k) => groups[k])
 })
+
+const filteredAvailableToolGroups = computed(() => filterAgentToolGroups(availableToolGroups.value, toolBindingSearch.value))
 
 /**
  * Manual checkbox handler — replaces v-model on the picker row so that
@@ -774,6 +797,8 @@ function openBlankCreateModal() {
   form.value = defaultForm()
   profileForm.value = emptyProfile()
   modalTab.value = 'basic'
+  skillBindingSearch.value = ''
+  toolBindingSearch.value = ''
   selectedSkillIds.value = []
   selectedKbIds.value = []
   availableKBs.value = []
@@ -848,6 +873,8 @@ async function openEditModal(agent: Agent) {
   }
   profileForm.value = parsePrompt(agent.systemPrompt)
   modalTab.value = 'basic'
+  skillBindingSearch.value = ''
+  toolBindingSearch.value = ''
   showModal.value = true
 
   // Load available skills/tools/providers and current bindings in parallel
@@ -895,6 +922,8 @@ async function openEditModal(agent: Agent) {
 function closeModal() {
   showModal.value = false
   editingAgent.value = null
+  skillBindingSearch.value = ''
+  toolBindingSearch.value = ''
 }
 
 async function saveAgent() {
@@ -1282,6 +1311,29 @@ html.dark .live-pill {
   margin: 0;
 }
 .binding-empty { padding: 40px; text-align: center; color: var(--mc-text-tertiary); font-size: 14px; }
+.binding-empty--compact { padding: 24px 12px; }
+.binding-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--mc-border);
+  border-radius: 8px;
+  background: var(--mc-bg-sunken);
+  color: var(--mc-text-tertiary);
+}
+.binding-search svg { flex-shrink: 0; }
+.binding-search input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--mc-text-primary);
+  font-size: 13px;
+}
+.binding-search input::placeholder { color: var(--mc-text-tertiary); }
 .binding-list { display: flex; flex-direction: column; gap: 6px; }
 .binding-item {
   display: flex; align-items: center; gap: 10px; padding: 10px 12px;
