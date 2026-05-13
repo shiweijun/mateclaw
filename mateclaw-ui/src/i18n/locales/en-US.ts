@@ -1373,6 +1373,9 @@ export default {
       },
       messages: {
         ruleIdRequired: 'Rule ID is required',
+        nameRequired: 'Name is required',
+        patternRequired: 'Regex pattern is required',
+        ruleIdDuplicate: 'Rule ID already exists',
         saveFailed: 'Failed to save rule',
       },
     },
