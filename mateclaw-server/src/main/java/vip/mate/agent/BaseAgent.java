@@ -15,6 +15,7 @@ import vip.mate.llm.routing.MediaCaptionService;
 import vip.mate.llm.routing.MultimodalRouter;
 import vip.mate.llm.routing.model.MultimodalRoutingDecision;
 import vip.mate.llm.service.ModelCapabilityService;
+import org.springframework.ai.chat.messages.ToolResponseMessage;
 import vip.mate.workspace.conversation.ConversationService;
 import vip.mate.workspace.conversation.model.MessageContentPart;
 import vip.mate.workspace.conversation.model.MessageEntity;
@@ -24,6 +25,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.EnumSet;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
@@ -235,14 +237,43 @@ public abstract class BaseAgent {
                     agentName, history.size(), totalCount, windowSize);
         }
 
-        // ===== 识别持久化的压缩摘要：从摘要位置开始，跳过更早消息 =====
-        for (int i = 0; i < history.size(); i++) {
+        // ===== Slice from the LATEST compression boundary, not the first =====
+        // A long-running conversation can accumulate several boundaries; the
+        // newest one is the only relevant cut-off because every earlier
+        // boundary's content is already folded into the newer summary. Walking
+        // forward and breaking on the first boundary kept everything between
+        // boundaries — the very redundancy compaction was supposed to remove.
+        boolean boundaryFoundInWindow = false;
+        for (int i = history.size() - 1; i >= 0; i--) {
             MessageEntity msg = history.get(i);
             if ("system".equals(msg.getRole()) && isCompressionSummary(msg)) {
                 history = new ArrayList<>(history.subList(i, history.size()));
-                log.info("[{}] Found compression summary, loading from index {} ({} messages)",
+                boundaryFoundInWindow = true;
+                log.info("[{}] Found latest compression boundary at index {}; loading {} messages forward",
                         agentName, i, history.size());
                 break;
+            }
+        }
+
+        // ===== Latest boundary may live OUTSIDE the recent window =====
+        // On a long conversation that compacted hours/days ago and has paged
+        // fewer than `windowSize` new messages since, `listRecentMessages`
+        // returns only the raw tail — the boundary sat at index 0 of the
+        // original list and never made it into `history`. Without prepending
+        // it, the model would forget the original goal even though we already
+        // paid the LLM cost to produce a structured summary.
+        if (!boundaryFoundInWindow && totalCount > windowSize) {
+            try {
+                MessageEntity latestBoundary = conversationService.findLatestCompressionBoundary(conversationId);
+                if (latestBoundary != null) {
+                    history = new ArrayList<>(history);
+                    history.add(0, latestBoundary);
+                    log.info("[{}] Prepended out-of-window compression boundary id={} so the model keeps the summary context",
+                            agentName, latestBoundary.getId());
+                }
+            } catch (Exception e) {
+                log.warn("[{}] findLatestCompressionBoundary failed; loading recent window without boundary: {}",
+                        agentName, e.getMessage());
             }
         }
 
@@ -299,7 +330,123 @@ public abstract class BaseAgent {
         while (!messages.isEmpty() && messages.get(messages.size() - 1) instanceof UserMessage) {
             messages.remove(messages.size() - 1);
         }
+
+        // Head guard — orphan tool-response strip.
+        //
+        // Independent of the compaction pair-safe boundary in
+        // ConversationWindowManager: that one protects the *compaction* cut,
+        // this one protects the *pagination* cut. listRecentMessages returns
+        // the last N rows verbatim, and the first row of that page can be a
+        // ToolResponseMessage whose owning AssistantMessage sat one row
+        // earlier — i.e. outside the page. Sending such a sequence to any
+        // OpenAI-compatible provider returns 400 because every tool response
+        // must be preceded by an assistant message issuing that tool_call_id.
+        //
+        // The boundary prepend earlier inserts a SystemMessage at the head;
+        // the orphan, if present, sits at index 1 in that case. Skip leading
+        // SystemMessages and drop any leading ToolResponseMessage whose
+        // response ids are not all issued by a *preceding* AssistantMessage
+        // — i.e. one we have already walked past in this scan. Provider
+        // validity is order-sensitive; a later same-id assistant deeper in
+        // the window does NOT redeem an earlier orphan. See
+        // stripHeadOrphanToolResponses below for the forward-scan details.
+        //
+        // Dropping is correct rather than expanding backward to fetch the
+        // missing assistant: if the AssistantMessage is outside the window,
+        // its content is already lost to the model anyway, and the boundary
+        // summary (if any) covers it. Keeping the orphan would just trade a
+        // dropped row for a 400.
+        stripHeadOrphanToolResponses(messages, agentName);
         return messages;
+    }
+
+    /**
+     * Drop leading {@link ToolResponseMessage}s whose owning
+     * {@link AssistantMessage} sits <em>before</em> them in this list. Provider
+     * validity is order-sensitive: a tool response must follow the assistant
+     * that issued the tool_call_id; an unrelated later AssistantMessage that
+     * happens to carry the same id does not redeem an earlier orphan.
+     *
+     * <p>Algorithm: forward scan with a {@code seenIssuedIds} set. Leading
+     * {@link SystemMessage}s (boundary rows, system prompts) pass through
+     * untouched but contribute no ids. The first {@link AssistantMessage} or
+     * {@link UserMessage} we hit stops the repair walk — by that point we're
+     * out of head-orphan territory. Every {@link ToolResponseMessage} we
+     * encounter before that stop is checked against {@code seenIssuedIds};
+     * if every response id is unseen, the message is dropped and the scan
+     * re-examines the new head. A response whose ids are all in the seen
+     * set (e.g. {@code [system, assistant(X), toolResponse(X), ...]} when
+     * the assistant fell at index 1 of the slice) is left in place.
+     *
+     * <p>Mixed responses (some ids matched, some not) inside a single
+     * leading {@code ToolResponseMessage} are dropped wholesale rather than
+     * surgically rewritten — the provider would reject partially-broken
+     * sequences anyway, and the mixed case implies an upstream invariant
+     * violation that surfaces in logs.
+     *
+     * <p>Package-private + static so unit tests can drive it without standing
+     * up a full BaseAgent subclass.
+     */
+    static int stripHeadOrphanToolResponses(List<Message> messages, String agentName) {
+        if (messages.isEmpty()) return 0;
+
+        // Built up as we walk; only assistants we've already passed count
+        // toward "preceding". An assistant that sits behind a head orphan is
+        // irrelevant: provider order-validity asks "was this tool_call id
+        // issued BEFORE this response?", not "anywhere in the prompt".
+        Set<String> seenIssuedIds = new HashSet<>();
+
+        int dropped = 0;
+        int i = 0;
+        while (i < messages.size()) {
+            Message m = messages.get(i);
+            if (m instanceof SystemMessage) {
+                // Boundary rows / system prompts pass through; advance and
+                // keep looking for orphan tool responses that sit behind them.
+                i++;
+                continue;
+            }
+            if (m instanceof AssistantMessage am) {
+                // Reached a preceding assistant — head danger is over. The
+                // tool_call ids it issued are valid for any tool responses
+                // that follow, but we stop the repair walk here either way.
+                if (am.getToolCalls() != null) {
+                    for (AssistantMessage.ToolCall tc : am.getToolCalls()) {
+                        if (tc.id() != null && !tc.id().isEmpty()) {
+                            seenIssuedIds.add(tc.id());
+                        }
+                    }
+                }
+                break;
+            }
+            if (m instanceof ToolResponseMessage trm) {
+                // Every response id must have been issued by a preceding
+                // assistant we already walked through. If any single id is
+                // missing from seenIssuedIds, the message is invalid in
+                // place. Empty / null ids don't count for or against.
+                boolean anyUnmatched = trm.getResponses().stream()
+                        .map(ToolResponseMessage.ToolResponse::id)
+                        .filter(id -> id != null && !id.isEmpty())
+                        .anyMatch(id -> !seenIssuedIds.contains(id));
+                if (anyUnmatched) {
+                    messages.remove(i);
+                    dropped++;
+                    continue; // re-examine the new messages[i]
+                }
+                // All ids match a preceding assistant — keep, and stop the
+                // repair walk. Anything past here is well-formed by
+                // construction (provider validates each subsequent pair as
+                // we go).
+                break;
+            }
+            // UserMessage (or anything else) — past the head danger. Stop.
+            break;
+        }
+        if (dropped > 0) {
+            log.info("[{}] Stripped {} leading orphan ToolResponseMessage(s) — no preceding AssistantMessage in scope",
+                    agentName, dropped);
+        }
+        return dropped;
     }
 
     /**

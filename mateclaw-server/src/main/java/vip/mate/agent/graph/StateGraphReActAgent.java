@@ -439,7 +439,8 @@ public class StateGraphReActAgent extends BaseAgent implements StructuredStreamC
                     chatModel,
                     conversationId,
                     parsedAgentId,
-                    toolSet != null ? toolSet.callbacks() : null);
+                    toolSet != null ? toolSet.callbacks() : null,
+                    workspaceBasePath);
         }
 
         List<Message> messages = new ArrayList<>(historyMessages);
