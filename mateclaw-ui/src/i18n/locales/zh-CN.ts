@@ -327,6 +327,8 @@ export default {
     // 按轮次分组渲染
     iterationEmpty: '第 {index} 轮被中断（无输出）',
     contentRepetitionWarning: '检测到内容尾部重复（疑似模型输出 artifact）',
+    supersededPreviewCollapsed: '过程预演已被实际工具结果替换',
+    expand: '展开',
     // INCOMPLETE 截断卡片（finishReason=incomplete）
     incompleteTitle: '回答因检测到重复输出已被自动截断',
     incompleteDescription: '系统在你看到的部分之后检测到模型开始重复同一段内容（或在思考阶段无产出），已自动截断以避免无效输出。点下方按钮重新生成完整回答，或在输入框补充提示让模型聚焦剩余内容。',
@@ -1432,9 +1434,47 @@ export default {
   mcp: {
     kicker: '能力桥接',
     title: 'MCP 连接',
+    subtitle: '把 Agent 连到外部数据源和工具',
     desc: '管理 MCP (Model Context Protocol) 服务器连接',
     addServer: '添加连接',
+    addCustom: '自定义 MCP',
     refreshAll: '全量刷新',
+    searchPlaceholder: '搜索 MCP 服务…',
+    emptyMatch: '没有匹配的 MCP 服务',
+    catalogBadge: '来自 Catalog · {name}',
+    credentialHint: '请替换占位符 {keys} 再保存',
+    credentialHintRequired: '必填凭据：{keys}（请替换占位符再保存）',
+    credentialHintOptional: '可选凭据：{keys}（如需调用相关 API 请填写）',
+    credentialHintBoth: '必填：{required} · 可选：{optional}',
+    sections: {
+      added: '已添加',
+      recommended: '推荐',
+      countItems: '{n} 个',
+    },
+    card: {
+      docs: '查看文档',
+      add: '安装',
+      toolCount: '{n} 个工具',
+    },
+    toggle: {
+      enable: '启用',
+      disable: '停用',
+    },
+    kv: {
+      envKey: 'KEY',
+      envValue: '值',
+      headerKey: 'Header',
+      headerValue: '值',
+      addEnv: '添加环境变量',
+      addHeader: '添加 Header',
+      required: '必填',
+      optional: '可选',
+    },
+    time: {
+      justNow: '刚刚',
+      minutesAgo: '{n} 分钟前',
+      hoursAgo: '{n} 小时前',
+    },
     columns: {
       name: '名称',
       transport: '协议',
@@ -1464,10 +1504,10 @@ export default {
       description: '描述',
       transport: '传输协议',
       url: 'URL',
-      headers: 'HTTP Headers (JSON)',
+      headers: 'HTTP Headers',
       command: '命令',
       args: '参数 (JSON 数组)',
-      env: '环境变量 (JSON)',
+      env: '环境变量',
       cwd: '工作目录',
       connectTimeout: '连接超时 (秒)',
       readTimeout: '读取超时 (秒)',
@@ -2199,6 +2239,7 @@ export default {
     tabs: {
       canvas: '画布视图',
       json: 'JSON 编辑',
+      runs: '运行 ({count})',
     },
     canvas: {
       empty: '当前草稿没有任何步骤，先在 JSON 编辑器中添加步骤或选择一个模板。',
@@ -2242,7 +2283,8 @@ export default {
         agentPlaceholder: '选择数字员工',
         agentMissing: '当前数字员工不在列表中：{name}',
         promptTemplate: 'Prompt 模板',
-        promptPlaceholder: 'Hello {{ inputs.payload }}',
+        // promptPlaceholder is intentionally not localized — hardcoded in
+        // StepPropertyPanel so vue-i18n's parser never sees the Pebble braces.
         outputVar: '输出变量名',
         outputVarPlaceholder: 'data',
         outputContentType: '输出类型',

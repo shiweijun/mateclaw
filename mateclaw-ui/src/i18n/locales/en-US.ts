@@ -327,6 +327,8 @@ export default {
     // Per-iteration grouping
     iterationEmpty: 'Iteration {index} interrupted (no output)',
     contentRepetitionWarning: 'Repetitive content detected near the end (model artifact)',
+    supersededPreviewCollapsed: 'Model preview replaced by the actual tool result',
+    expand: 'Expand',
     // INCOMPLETE truncation card (finishReason=incomplete)
     incompleteTitle: 'Answer auto-truncated after repeated output was detected',
     incompleteDescription: 'After the visible text above, the model started repeating itself (or stalled in thinking with no output) and was cut short to avoid wasted tokens. Click below to regenerate the full answer, or refine your prompt to focus on the missing parts.',
@@ -1534,9 +1536,47 @@ export default {
   mcp: {
     kicker: 'Capability Bridge',
     title: 'MCP Connections',
+    subtitle: 'Connect agents to external data sources and tools',
     desc: 'Manage MCP (Model Context Protocol) server connections',
     addServer: 'Add Connection',
+    addCustom: 'Custom MCP',
     refreshAll: 'Refresh All',
+    searchPlaceholder: 'Search MCP servers…',
+    emptyMatch: 'No servers match your search',
+    catalogBadge: 'From catalog · {name}',
+    credentialHint: 'Replace placeholders {keys} before saving',
+    credentialHintRequired: 'Required credentials: {keys} (replace placeholders before saving)',
+    credentialHintOptional: 'Optional credentials: {keys} (fill in if you need those APIs)',
+    credentialHintBoth: 'Required: {required} · Optional: {optional}',
+    sections: {
+      added: 'Added',
+      recommended: 'Recommended',
+      countItems: '{n}',
+    },
+    card: {
+      docs: 'View docs',
+      add: 'Install',
+      toolCount: '{n} tools',
+    },
+    toggle: {
+      enable: 'Enable',
+      disable: 'Disable',
+    },
+    kv: {
+      envKey: 'KEY',
+      envValue: 'value',
+      headerKey: 'Header',
+      headerValue: 'value',
+      addEnv: 'Add env var',
+      addHeader: 'Add header',
+      required: 'Required',
+      optional: 'Optional',
+    },
+    time: {
+      justNow: 'just now',
+      minutesAgo: '{n}m ago',
+      hoursAgo: '{n}h ago',
+    },
     columns: {
       name: 'Name',
       transport: 'Transport',
@@ -1566,10 +1606,10 @@ export default {
       description: 'Description',
       transport: 'Transport',
       url: 'URL',
-      headers: 'HTTP Headers (JSON)',
+      headers: 'HTTP Headers',
       command: 'Command',
       args: 'Arguments (JSON array)',
-      env: 'Environment Variables (JSON)',
+      env: 'Environment Variables',
       cwd: 'Working Directory',
       connectTimeout: 'Connect Timeout (seconds)',
       readTimeout: 'Read Timeout (seconds)',
@@ -2187,6 +2227,7 @@ export default {
     tabs: {
       canvas: 'Canvas',
       json: 'JSON',
+      runs: 'Runs ({count})',
     },
     canvas: {
       empty: 'The current draft has no steps. Add one in the JSON editor or pick a template.',
@@ -2230,7 +2271,8 @@ export default {
         agentPlaceholder: 'Select digital employee',
         agentMissing: 'Current digital employee is not in the list: {name}',
         promptTemplate: 'Prompt template',
-        promptPlaceholder: 'Hello {{ inputs.payload }}',
+        // promptPlaceholder is intentionally not localized — hardcoded in
+        // StepPropertyPanel so vue-i18n's parser never sees the Pebble braces.
         outputVar: 'Output variable',
         outputVarPlaceholder: 'data',
         outputContentType: 'Output type',
