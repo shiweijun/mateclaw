@@ -17,6 +17,9 @@ import vip.mate.memory.repository.MemoryRecallMapper;
 import vip.mate.memory.service.MorningCardService;
 import vip.mate.memory.service.MemoryHilService;
 import vip.mate.workspace.core.annotation.RequireWorkspaceRole;
+import vip.mate.auth.model.UserEntity;
+import vip.mate.auth.service.AuthService;
+import vip.mate.exception.MateClawException;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -38,10 +41,11 @@ public class DreamController {
     private final MorningCardService morningCardService;
     private final MemoryHilService hilService;
     private final DreamEventBroadcaster eventBroadcaster;
+    private final AuthService authService;
 
     @Operation(summary = "List dream reports (paginated, newest first)")
     @GetMapping("/reports")
-    @RequireWorkspaceRole("viewer")
+    @RequireWorkspaceRole("member")
     public R<Map<String, Object>> listReports(
             @PathVariable Long agentId,
             @RequestParam(defaultValue = "1") int page,
@@ -63,7 +67,7 @@ public class DreamController {
 
     @Operation(summary = "Get a single dream report by ID")
     @GetMapping("/reports/{reportId}")
-    @RequireWorkspaceRole("viewer")
+    @RequireWorkspaceRole("member")
     public R<DreamReportEntity> getReport(
             @PathVariable Long agentId,
             @PathVariable Long reportId) {
@@ -82,7 +86,7 @@ public class DreamController {
 
     @Operation(summary = "Subscribe to dream events (SSE)")
     @GetMapping(value = "/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    @RequireWorkspaceRole("viewer")
+    @RequireWorkspaceRole("member")
     public SseEmitter subscribeDreamEvents(@PathVariable Long agentId) {
         return eventBroadcaster.register(agentId);
     }
@@ -91,22 +95,20 @@ public class DreamController {
 
     @Operation(summary = "Get morning card for current user + agent")
     @GetMapping("/morning-card")
-    @RequireWorkspaceRole("viewer")
+    @RequireWorkspaceRole("member")
     public R<Map<String, Object>> getMorningCard(@PathVariable Long agentId, Authentication auth) {
         Long userId = resolveUserId(auth);
-        if (userId == null) return R.fail("Not authenticated");
         Map<String, Object> card = morningCardService.getCardFor(userId, agentId);
         return R.ok(card); // null = no card to show
     }
 
     @Operation(summary = "Mark morning card as seen")
     @PostMapping("/morning-card/seen")
-    @RequireWorkspaceRole("viewer")
+    @RequireWorkspaceRole("member")
     public R<Void> markMorningCardSeen(@PathVariable Long agentId,
                                         @RequestBody Map<String, Object> body,
                                         Authentication auth) {
         Long userId = resolveUserId(auth);
-        if (userId == null) return R.fail("Not authenticated");
         Long reportId = body.get("reportId") != null
                 ? Long.valueOf(body.get("reportId").toString()) : null;
         morningCardService.markSeen(userId, agentId, reportId);
@@ -178,17 +180,19 @@ public class DreamController {
         return R.ok(null);
     }
 
+    /**
+     * Resolve the authenticated user's id from the JWT principal. The auth
+     * filter exposes the username via {@link Authentication#getName()}, so the
+     * id is looked up by username — matching AgentController / WorkspaceController.
+     */
     private Long resolveUserId(Authentication auth) {
-        if (auth == null) return null;
-        try {
-            Object principal = auth.getPrincipal();
-            if (principal instanceof vip.mate.auth.model.UserEntity user) {
-                return user.getId();
-            }
-            // No stable user ID available — refuse rather than fabricate
-            return null;
-        } catch (Exception e) {
-            return null;
+        if (auth == null) {
+            throw new MateClawException("err.auth.unauthenticated", 401, "Not authenticated");
         }
+        UserEntity user = authService.findByUsername(auth.getName());
+        if (user == null) {
+            throw new MateClawException("err.auth.user_not_found", 401, "User not found: " + auth.getName());
+        }
+        return user.getId();
     }
 }

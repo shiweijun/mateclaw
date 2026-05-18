@@ -1,7 +1,7 @@
 <template>
   <div class="raw-panel">
     <!-- Upload + Add text row -->
-    <div class="upload-row">
+    <div v-if="canManageWiki" class="upload-row">
       <div
         class="upload-zone"
         :class="{ 'is-dragging': isDragging, 'is-uploading': uploadingFiles.length > 0 }"
@@ -45,7 +45,7 @@
     </div>
 
     <!-- Directory scan -->
-    <div class="dir-scan-row">
+    <div v-if="canManageWiki" class="dir-scan-row">
       <div class="dir-input-wrap">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
@@ -163,7 +163,7 @@
               {{ raw.errorMessage }}
             </span>
           </div>
-          <div class="raw-item-actions">
+          <div v-if="canManageWiki" class="raw-item-actions">
             <button
               v-if="raw.processingStatus === 'processing' && !cancellingIds.has(raw.id)"
               class="btn-icon btn-icon-danger" :title="t('wiki.cancel')"
@@ -286,15 +286,22 @@
 <script setup lang="ts">
 import { ref, reactive, computed, watch, onBeforeUnmount } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { ElMessage } from 'element-plus'
+import { mcToast } from '@/composables/useMcToast'
+import { useFileDrop } from '@/composables/useFileDrop'
 import { Download } from '@element-plus/icons-vue'
 import { useWikiStore } from '@/stores/useWikiStore'
+import { useWorkspaceStore } from '@/stores/useWorkspaceStore'
 import { wikiApi } from '@/api/index'
 import JobStageBar from './JobStageBar.vue'
 import type { WikiProcessingJob } from '@/composables/useWikiJobPoller'
 
 const { t } = useI18n()
 const store = useWikiStore()
+const workspace = useWorkspaceStore()
+
+// Uploading, scanning and (re)processing raw material all require manage:wiki.
+// Viewers can still see the material list but get no write controls.
+const canManageWiki = computed(() => workspace.can('manage:wiki'))
 const fileInput = ref<HTMLInputElement | null>(null)
 
 // While raw materials are active, subscribe to the backend SSE progress stream.
@@ -493,21 +500,12 @@ const scanning = ref(false)
 const scanResult = ref<{ scanned: number; added: number; skipped: number } | null>(null)
 
 // ─── Drag-over state ──────────────────────────────────────────────────────────
-// Use a counter to handle nested dragenter/dragleave without flickering.
-const isDragging = ref(false)
-let dragCounter = 0
+const { isDragging, onDragEnter, onDragLeave, onDrop: handleDrop } = useFileDrop(uploadDroppedFiles)
 
-function onDragEnter() {
-  dragCounter++
-  isDragging.value = true
-}
-
-function onDragLeave() {
-  dragCounter--
-  if (dragCounter <= 0) {
-    dragCounter = 0
-    isDragging.value = false
-  }
+async function uploadDroppedFiles(event: DragEvent) {
+  if (!event.dataTransfer?.files || !store.currentKB) return
+  const kbId = store.currentKB.id
+  await Promise.all(Array.from(event.dataTransfer.files).map(f => uploadFile(kbId, f)))
 }
 
 // ─── Optimistic upload items ──────────────────────────────────────────────────
@@ -550,7 +548,7 @@ async function uploadFile(kbId: number, file: File) {
   } catch (err: any) {
     item.status = 'error'
     item.errorMsg = err?.response?.data?.message || err?.message || t('wiki.uploadFailed', { name: file.name })
-    ElMessage.error(t('wiki.uploadFailed', { name: file.name }))
+    mcToast.error(t('wiki.uploadFailed', { name: file.name }))
   }
 }
 
@@ -567,14 +565,6 @@ async function handleFileSelect(event: Event) {
   input.value = ''
 }
 
-async function handleDrop(event: DragEvent) {
-  // Reset drag state
-  dragCounter = 0
-  isDragging.value = false
-  if (!event.dataTransfer?.files || !store.currentKB) return
-  const kbId = store.currentKB.id
-  await Promise.all(Array.from(event.dataTransfer.files).map(f => uploadFile(kbId, f)))
-}
 
 async function handleAddText() {
   if (!store.currentKB) return
@@ -653,7 +643,7 @@ async function downloadRaw(raw: { id: number; title?: string }) {
     setTimeout(() => URL.revokeObjectURL(url), 0)
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
-    ElMessage.error(`${t('wiki.downloadFailed')}: ${msg}`)
+    mcToast.error(`${t('wiki.downloadFailed')}: ${msg}`)
   }
 }
 
