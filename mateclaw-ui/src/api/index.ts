@@ -87,7 +87,7 @@ export const authApi = {
     http.post('/auth/login', data),
   listUsers: () => http.get('/auth/users'),
   createUser: (data: any) => http.post('/auth/users', data),
-  changePassword: (id: number, oldPassword: string, newPassword: string) =>
+  changePassword: (id: string | number, oldPassword: string, newPassword: string) =>
     http.put(`/auth/users/${id}/password`, null, { params: { oldPassword, newPassword } }),
 }
 
@@ -185,6 +185,8 @@ export const skillApi = {
     enabled?: boolean
     /** 'PASSED' / 'FAILED' — filters by security_scan_status. */
     scanStatus?: string
+    /** 'active' / 'stale' / 'archived' — filters by lifecycle_state. */
+    lifecycleState?: string
   } = {}) => http.get('/skills', { params }),
   /** Tab count aggregate — returns { all, builtin, mcp, dynamic } */
   counts: () => http.get('/skills/counts'),
@@ -217,6 +219,35 @@ export const skillApi = {
     http.post(`/skills/${id}/secrets`, { key, value }),
   deleteSecret: (id: string | number, key: string) =>
     http.delete(`/skills/${id}/secrets/${encodeURIComponent(key)}`),
+
+  // ---- Lifecycle curator ----
+  /** Pin / unpin a skill — pinned skills are never auto-archived. */
+  pin: (id: string | number, pinned: boolean) =>
+    http.post(`/skills/${id}/pin`, { pinned }),
+  /**
+   * Manually archive a skill. When the skill is bound to an enabled agent
+   * and {@code force} is false, the backend replies HTTP 409 with
+   * {@code code: 'BOUND_SKILL_CONFIRM_REQUIRED'} and a {@code boundAgents}
+   * list; retry with {@code force: true} to confirm.
+   */
+  archive: (id: string | number, opts: { force?: boolean; reason?: string } = {}) =>
+    http.post(`/skills/${id}/archive`, { reason: opts.reason ?? null },
+      { params: { force: opts.force ?? false } }),
+  /** Restore an archived skill back to active. */
+  restore: (id: string | number) => http.post(`/skills/${id}/restore`),
+  /** Curator control-panel status (config / control / counts / lastReport). */
+  curatorStatus: () => http.get('/skills/curator/status'),
+  /** Run a curator dry-run preview immediately. */
+  curatorDryRun: () => http.post('/skills/curator/dry-run'),
+  /** Activate (apply transitions) or deactivate (preview-only) the curator. */
+  curatorActivate: (activate: boolean) =>
+    http.post('/skills/curator/activate', null, { params: { activate } }),
+  curatorPause: () => http.post('/skills/curator/pause'),
+  curatorResume: () => http.post('/skills/curator/resume'),
+  /** List recent curator run report ids. */
+  curatorReports: () => http.get('/skills/curator/reports'),
+  /** Read one curator run report (parsed run.json). */
+  curatorReport: (runId: string) => http.get(`/skills/curator/reports/${runId}`),
 }
 
 /** Shape returned by GET /skills/{id}/secrets. */
@@ -463,7 +494,7 @@ export const modelApi = {
   addProviderModel: (providerId: string, data: any) =>
     http.post(`/models/${providerId}/models`, data),
   removeProviderModel: (providerId: string, modelId: string) =>
-    http.delete(`/models/${providerId}/models/${encodeURIComponent(modelId)}`),
+    http.delete(`/models/${providerId}/models`, { params: { modelId } }),
   getActive: () => http.get('/models/active'),
   setActive: (data: { providerId: string; model: string }) =>
     http.put('/models/active', data),
@@ -475,7 +506,7 @@ export const modelApi = {
   testConnection: (providerId: string) =>
     http.post(`/models/${providerId}/test-connection`),
   testModel: (providerId: string, modelId: string) =>
-    http.post(`/models/${providerId}/models/${encodeURIComponent(modelId)}/test`),
+    http.post(`/models/${providerId}/models/test`, null, { params: { modelId } }),
 
   // ==================== RFC-074: enabled / catalog ====================
   /** Full provider catalog including enabled=false rows; powers the Add Provider drawer. */
@@ -640,6 +671,8 @@ export const securityApi = {
   toggleRule: (ruleId: string, enabled: boolean) =>
     http.put(`/security/guard/rules/${ruleId}/toggle?enabled=${enabled}`),
   deleteRule: (ruleId: string) => http.delete(`/security/guard/rules/${ruleId}`),
+  exportRules: () => http.get('/security/guard/rules/export'),
+  importRules: (data: { rules: any[] }) => http.post('/security/guard/rules/import', data),
   listAuditLogs: (params?: any) => http.get('/security/audit/logs', { params }),
   getAuditStats: () => http.get('/security/audit/stats'),
   listApprovals: (params?: any) => http.get('/security/approvals', { params }),
@@ -924,13 +957,19 @@ export const hotCacheApi = {
 
 export interface WorkflowSummary {
   id: number
-  workspaceId: number
+  workspaceId: string | number
   name: string
   description?: string
   enabled: boolean
   draftJson?: string
   draftUpdatedAt?: string
   latestRevisionId?: number
+  /** Human version number of the latest published revision (1, 2, 3…) — shown
+   *  as "v3" instead of the latestRevisionId snowflake. Null when unpublished. */
+  latestRevisionNumber?: number
+  /** Latest published revision's graph JSON — populated by GET /workflows/{id}
+   *  so the editor can render a published workflow whose draft was cleared. */
+  publishedGraphJson?: string
   createTime: string
   updateTime: string
 }
@@ -950,7 +989,7 @@ export interface WorkflowRun {
   id: number
   workflowId: number
   revisionId: number
-  workspaceId: number
+  workspaceId: string | number
   state: string
   triggeredBy?: string
   initialInputRef?: string
@@ -1013,7 +1052,7 @@ export interface ResumeResponse {
 }
 
 export const workflowApi = {
-  list: (workspaceId: number) =>
+  list: (workspaceId: string | number) =>
     http.get<WorkflowSummary[]>('/workflows', { params: { workspaceId } }),
   get: (id: number) => http.get<WorkflowSummary>(`/workflows/${id}`),
   create: (data: Partial<WorkflowSummary>) =>
@@ -1084,7 +1123,7 @@ export interface WorkflowDraftTemplate {
 
 export interface TriggerSummary {
   id: number
-  workspaceId: number
+  workspaceId: string | number
   name?: string
   patternType: string
   patternJson: string
@@ -1114,7 +1153,7 @@ export interface TriggerSummary {
 }
 
 export const triggerApi = {
-  list: (workspaceId: number) =>
+  list: (workspaceId: string | number) =>
     http.get<TriggerSummary[]>('/triggers', { params: { workspaceId } }),
   get: (id: number) => http.get<TriggerSummary>(`/triggers/${id}`),
   create: (data: Partial<TriggerSummary>) =>
@@ -1123,7 +1162,7 @@ export const triggerApi = {
     http.put<TriggerSummary>(`/triggers/${id}`, data),
   delete: (id: number) => http.delete(`/triggers/${id}`),
   ingestEvent: (envelope: {
-    workspaceId: number
+    workspaceId: string | number
     patternType: string
     eventId?: string
     senderId?: string
