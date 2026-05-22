@@ -154,6 +154,13 @@ export const chatApi = {
 // ==================== Conversation ====================
 export const conversationApi = {
   list: () => http.get('/conversations'),
+  /**
+   * Paginated list used by the Sessions admin page. Keyword matches title
+   * or conversationId server-side; ChatConsole's left panel still uses the
+   * non-paginated list() because it shows a per-agent rolling history.
+   */
+  page: (params: { page?: number; size?: number; keyword?: string }) =>
+    http.get('/conversations/page', { params }),
   listMessages: (conversationId: string, params?: { beforeId?: number; limit?: number }) =>
     http.get(`/conversations/${conversationId}/messages`, { params }),
   getStatus: (conversationId: string) =>
@@ -166,6 +173,14 @@ export const conversationApi = {
     http.put(`/conversations/${conversationId}/title`, { title }),
   setPinned: (conversationId: string, pinned: boolean) =>
     http.put(`/conversations/${conversationId}/pin`, { pinned }),
+  /**
+   * Pin this conversation to a specific (provider, model). Closes issue
+   * #183 — lets the admin UI switch model for IM-channel conversations
+   * (Feishu / DingTalk / WeCom / Telegram / Discord / QQ / Slack / WeChat),
+   * not just for the Web channel. Both params required and non-empty.
+   */
+  setModel: (conversationId: string, modelProvider: string, modelName: string) =>
+    http.put(`/conversations/${conversationId}/model`, { modelProvider, modelName }),
   batchDelete: (conversationIds: string[]) =>
     http.post('/conversations/batch-delete', { conversationIds }),
 }
@@ -291,6 +306,11 @@ export interface LiveSubagentCard {
   subagentId: string
   parentConversationId: string | null
   childConversationId: string | null
+  rootConversationId: string | null
+  /** subagentId of the immediate parent; null for first-level (depth-1) children. */
+  parentSubagentId: string | null
+  /** 1 for a first-level child, 2 for a grandchild, etc. */
+  depth: number
   agentId: number | null
   agentName: string | null
   agentIcon: string | null
@@ -448,6 +468,11 @@ export const channelApi = {
     http.post('/channels/webhook/dingtalk/register/begin'),
   dingtalkRegisterStatus: (sessionId: string) =>
     http.get(`/channels/webhook/dingtalk/register/status?session=${encodeURIComponent(sessionId)}`),
+  // QQ Bot scan-to-bind (Lite portal). Uses the unified channel QR auth endpoint.
+  qqRegisterBegin: () =>
+    http.post('/channels/qrcode/qq/begin'),
+  qqRegisterStatus: (sessionId: string) =>
+    http.get(`/channels/qrcode/qq/status?session=${encodeURIComponent(sessionId)}`),
 }
 
 // ==================== MCP Server ====================
@@ -1168,4 +1193,77 @@ export const triggerApi = {
     senderId?: string
     data?: Record<string, unknown>
   }) => http.post('/triggers/events', envelope),
+}
+
+// ==================== Persistent goals (RFC 48) ====================
+//
+// Snowflake IDs are sent as strings end-to-end — the backend's
+// ToStringSerializer makes responses strings, and request payloads keep
+// them as strings to dodge JS Number precision loss. See CLAUDE.md
+// "ID Handling — Snowflake Precision Convention".
+export interface Goal {
+  id: string
+  conversationId: string
+  agentId: string
+  workspaceId: string
+  createdBy: string
+  title: string
+  description: string
+  exitCriteria?: string | null
+  status: 'active' | 'paused' | 'completed' | 'abandoned' | 'exhausted'
+  turnBudget: number
+  turnsUsed: number
+  llmCallBudget: number
+  agentLlmCallsUsed: number
+  evalLlmCallsUsed: number
+  progressSummary?: string | null
+  completionScore?: number | null
+  lastEvaluationAt?: string | null
+  autoFollowupEnabled: boolean
+  followupCooldownSeconds: number
+  lastFollowupAt?: string | null
+  createTime: string
+  updateTime: string
+}
+
+export interface GoalEvent {
+  id: string
+  goalId: string
+  eventType: string
+  messageId?: string | null
+  detailJson?: string | null
+  createTime: string
+}
+
+export const goalApi = {
+  create: (data: {
+    conversationId: string
+    agentId: string | number
+    workspaceId: string | number
+    title: string
+    description?: string
+    exitCriteria?: string
+    turnBudget?: number
+    llmCallBudget?: number
+    autoFollowupEnabled?: boolean
+    followupCooldownSeconds?: number
+  }) => http.post<Goal>('/goals', data),
+
+  findActive: (conversationId: string) =>
+    http.get<Goal | null>(`/goals/by-conversation/${conversationId}`),
+
+  get: (id: string) => http.get<Goal>(`/goals/${id}`),
+
+  events: (id: string, limit = 100) =>
+    http.get<GoalEvent[]>(`/goals/${id}/events`, { params: { limit } }),
+
+  list: (params?: { status?: string; limit?: number }) =>
+    http.get<Goal[]>('/goals', { params }),
+
+  update: (id: string, data: Partial<Goal>) => http.patch<Goal>(`/goals/${id}`, data),
+  pause: (id: string) => http.post<Goal>(`/goals/${id}/pause`),
+  resume: (id: string) => http.post<Goal>(`/goals/${id}/resume`),
+  abandon: (id: string) => http.post<Goal>(`/goals/${id}/abandon`),
+  addCriterion: (id: string, criterion: string) =>
+    http.post<Goal>(`/goals/${id}/criteria`, { criterion }),
 }
