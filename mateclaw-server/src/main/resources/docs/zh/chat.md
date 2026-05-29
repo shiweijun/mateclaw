@@ -119,7 +119,7 @@ ChatConsole 不只是你自己聊天的地方。它是一个**运营控制台**�
 你输入
    │
    ▼
-POST /api/v1/chat/{agentId}/message          ← 或走 SSE 流式
+POST /api/v1/chat?agentId={id}                ← 或走 SSE 流式（POST /api/v1/chat/stream）
    │
    ▼
 Conversation Manager                          ← 加载/创建会话，追加用户消息
@@ -171,6 +171,62 @@ SSE 流 / 直接响应                             ← segment 一段一段送�
 
 Segment 的结构是渐进展示的底层。它也让**数据库成为单一事实源**——UI 可以把任何一条历史回复完整地复现成它流式时的样子。
 
+### 按会话选模型
+
+::: tip 1.4.0 新增
+聊天顶栏的模型选择器现在把模型**绑定在会话上**，而不是全局开关。详见 [issue #150](https://github.com/matevip/mateclaw/issues/150)。
+:::
+
+在顶栏切换模型，只影响**当前这个会话**：选择会随会话存下来，并从**下一条消息**开始生效。没有显式设置过的会话，回落到工作空间默认模型。运行时模型指示器始终和会话上钉住的那一个保持同步——你看到的就是下一回合真正会用的。
+
+这条隔离也让模型配置更健壮：**一个写错的模型 id 不再拖垮它所在的整个 Provider**。坏会话只影响自己，其他会话照常跑。
+
+### 会话列表管理
+
+::: tip 1.4.0 新增
+会话侧栏从一条单纯的历史列表，升级成了一个可操作的运营面板。详见 [issue #144](https://github.com/matevip/mateclaw/issues/144)。
+:::
+
+- **置顶 / 取消置顶**——从每行的 `⋮` 溢出菜单操作，重要的会话固定在列表顶部的「置顶」分组里。
+- **多选批量删除**——进入多选模式后，每行出现复选框，勾选若干条一次性删除。
+- **按员工筛选**——当工作空间里有 **2 个及以上员工**时，侧栏顶部出现一个下拉，按员工过滤会话列表（只有一个员工时不显示，避免无意义的控件）。
+- **状态点**——一眼看出每个会话的状态：正在生成（蓝色脉冲）、存在进行中的目标、有未读内容。
+
+### 全局快捷键
+
+::: tip 1.4.0 新增
+两个全局快捷键，让你不碰鼠标就能在对话之间跳转。提示常驻在侧栏底部。
+:::
+
+| 快捷键 | 行为 |
+|--------|------|
+| `Ctrl/Cmd + K` | 打开员工选择器，跳到任意一个聊天 |
+| `Ctrl/Cmd + N` | 新建一个会话 |
+
+`Ctrl+N` 在你正于输入框 / 文本域里打字时不会触发，留给浏览器原生行为。
+
+### 会话管理页
+
+::: tip 1.4.0 新增
+当会话多到侧栏装不下时，从聊天顶栏的溢出菜单进「会话管理」，去一个专门的管理页（`/sessions`）。
+:::
+
+这个页面是为「会话很多」而生的：
+
+- **服务端分页**——不再一次把上千条会话塞进侧栏。
+- **按标题 / ID 搜索**——输入即筛，定位到具体会话。
+- **深度卡片布局**——每个会话一张卡片，信息密度比侧栏更高。
+- **行内可编辑的模型 chip**——每行直接显示并切换该会话的模型，不用先进会话。
+- **返回按钮**——一键回到聊天控制台。
+
+### 共享的员工选择器
+
+::: tip 1.4.0 新增
+一个共享的选择器对话框，被三处复用：侧栏、`Ctrl+K` 快捷键、以及新建会话弹窗。
+:::
+
+三个入口打开的是**同一个对话框**，行为完全一致。对话框里的 Agent 图标**按员工做了颜色区分**，多员工工作空间里一眼就能认出谁是谁。
+
 ---
 
 ## 上下文窗口管理
@@ -214,30 +270,48 @@ Segment 的结构是渐进展示的底层。它也让**数据库成为单一事�
 ### 发送消息
 
 ```bash
-curl -X POST http://localhost:18088/api/v1/chat/1/message \
+curl -X POST 'http://localhost:18088/api/v1/chat?agentId=1' \
   -H "Authorization: Bearer YOUR_JWT_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "content": "东京现在几点？",
+    "message": "东京现在几点？",
     "conversationId": "conv-abc123"
   }'
 ```
 
-省略 `conversationId` 就会开一个新会话。
+省略 `conversationId` 就会开一个新会话。`agentId` 是 query 参数，**不是**路径段。
 
 ### SSE 流式
 
-```javascript
-const eventSource = new EventSource(
-  '/api/v1/chat/1/stream?conversationId=conv-abc123',
-  { headers: { 'Authorization': 'Bearer YOUR_JWT_TOKEN' } }
-);
+SSE 端点是 `POST /api/v1/chat/stream`，请求体里带 `agentId`。浏览器原生 `EventSource` 只支持 GET，所以集成时用 `fetch()` 读流：
 
-eventSource.onmessage = (event) => {
-  const data = JSON.parse(event.data);
-  // 处理 segment
-};
+```javascript
+const resp = await fetch('/api/v1/chat/stream', {
+  method: 'POST',
+  headers: {
+    'Authorization': 'Bearer YOUR_JWT_TOKEN',
+    'Content-Type': 'application/json',
+    'Accept': 'text/event-stream',
+  },
+  body: JSON.stringify({
+    agentId: 1,
+    message: '东京现在几点？',
+    conversationId: 'conv-abc123',
+  }),
+});
+
+const reader = resp.body.getReader();
+const decoder = new TextDecoder();
+let buf = '';
+while (true) {
+  const { value, done } = await reader.read();
+  if (done) break;
+  buf += decoder.decode(value, { stream: true });
+  // 按 SSE 协议拆 `\n\n` 边界，逐事件处理 segment
+}
 ```
+
+完整客户端实现可以参考 `mateclaw-ui/src/composables/chat/useChat.ts`。
 
 ### SSE 事件类型
 

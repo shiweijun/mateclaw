@@ -16,7 +16,7 @@
 Authorization: Bearer <token>
 ```
 
-深入的行为细节去读对应的功能页——[聊天与消息](./chat)、[Agent 引擎](./agents)、[工具系统](./tools)、[安全与审批](./security)、[LLM Wiki](./wiki)、[多模态创作](./multimodal)、[记忆系统](./memory)、[多渠道接入](./channels)、[模型配置](./models)、[工作空间](./workspaces)、[Doctor](./doctor)。
+深入的行为细节去读对应的功能页——[聊天与消息](./chat)、[Agent 引擎](./agents)、[工具系统](./tools)、[安全与审批](./security)、[LLM Wiki](./wiki)、[多模态创作](./multimodal)、[记忆系统](./memory)、[多渠道接入](./channels)、[模型配置](./models)、[工作空间](./workspaces)、[目标](./goals)、[Doctor](./doctor)。
 
 ---
 
@@ -55,26 +55,36 @@ curl -X POST http://localhost:18088/api/v1/auth/login \
 ## 聊天
 
 ```
-POST /api/v1/chat/{agentId}/message              # 发送消息
-GET  /api/v1/chat/{agentId}/stream?conversationId=  # SSE 流式
-POST /api/v1/chat/{conversationId}/stop          # 停止进行中的流
-GET  /api/v1/chat/{conversationId}/pending-approvals  # 列出等待的审批
+POST /api/v1/chat?agentId={id}                  # 发送消息（同步，agentId 是 query 参数）
+POST /api/v1/chat/stream                        # SSE 流式（POST，agentId 在 body 里）
+POST /api/v1/chat/{conversationId}/stop         # 停止进行中的流
+POST /api/v1/chat/{conversationId}/interrupt   # 中断 Agent 循环
+POST /api/v1/chat/upload                        # 上传聊天附件（multipart/form-data）
+GET  /api/v1/chat/files/{conversationId}/{storedName}  # 读取已上传附件
+GET  /api/v1/chat/{conversationId}/pending-approvals   # 列出等待的审批
 ```
 
 **发送消息：**
 
 ```bash
-curl -X POST http://localhost:18088/api/v1/chat/1/message \
+curl -X POST 'http://localhost:18088/api/v1/chat?agentId=1' \
   -H "Authorization: Bearer YOUR_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"content":"你好，你能做什么？", "conversationId":"conv-abc123"}'
+  -d '{"message":"你好，你能做什么？", "conversationId":"conv-abc123"}'
 ```
+
+请求体字段：`message`（必填）、`conversationId`（可选，省略则用 `default`）、`contentParts`（可选，结构化内容片段，附件场景使用）。
 
 **SSE 流式示例：**
 
+SSE 端点是 **POST + 请求体**，浏览器原生 `EventSource` 不支持 POST，集成时请用 `fetch()` 读流（参考前端 `composables/chat/useChat.ts`）。
+
 ```bash
-curl -N http://localhost:18088/api/v1/chat/1/stream?conversationId=conv-abc123 \
-  -H "Authorization: Bearer YOUR_TOKEN"
+curl -N -X POST 'http://localhost:18088/api/v1/chat/stream' \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{"agentId":1, "message":"你好", "conversationId":"conv-abc123"}'
 ```
 
 事件类型和 schema 在 [聊天与消息](./chat) 里。
@@ -83,7 +93,9 @@ curl -N http://localhost:18088/api/v1/chat/1/stream?conversationId=conv-abc123 \
 
 ```
 GET    /api/v1/conversations                       # 列表（?page&size&agentId）
+GET    /api/v1/conversations/page?page=&size=&keyword=  # 分页会话（带关键词搜索）
 GET    /api/v1/conversations/{id}/messages         # 取消息
+PUT    /api/v1/conversations/{id}/model            # 设置该会话使用的模型
 DELETE /api/v1/conversations/{id}                  # 删除
 DELETE /api/v1/conversations/{id}/messages         # 清空消息
 GET    /api/v1/conversations/{id}/status           # 会话状态
@@ -109,8 +121,46 @@ DELETE /api/v1/agents/{id}/workspace/files/{filename}         # 删除
 GET    /api/v1/agents/{id}/workspace/prompt-files             # 哪些文件被注入
 PUT    /api/v1/agents/{id}/workspace/prompt-files             # 设置注入的文件列表
 
+GET    /api/v1/agents/{agentId}/workspace/memory/export           # 导出记忆快照
+POST   /api/v1/agents/{agentId}/workspace/memory/import/preview   # 预览导入（不落库）
+POST   /api/v1/agents/{agentId}/workspace/memory/import           # 导入记忆快照
+
 GET    /api/v1/agents/templates        # 列出模板
 POST   /api/v1/agents/templates/{id}   # 从模板创建
+```
+
+### 字段：`primaryKbId`（1.5.0+）
+
+每个员工可以指定一个**主知识库**作为 wiki 工具的默认目标。字段类型 `string | null`（雪花 ID，前端始终按字符串处理）。
+
+`PUT /api/v1/agents/{id}` 的语义是**三态**的：
+
+| 请求体里 | 行为 |
+|---------|------|
+| 不带 `primaryKbId` 这个字段 | 保留原值，不动 |
+| `"primaryKbId": "<kbId>"` | 设为指定 KB |
+| `"primaryKbId": null` | 清空（之后 wiki 工具按 workspace 默认 KB 回退） |
+
+服务端用 `body.containsKey("primaryKbId")` 区分"字段缺失"和"显式 null"，entity 上配 `@TableField(updateStrategy = FieldStrategy.ALWAYS)` 保证 null 真的写到数据库（不会被 MyBatis-Plus 默认 `NOT_NULL` 策略静默跳过）。
+
+设计语义：**KB 是工作空间共享的，`primaryKbId` 只决定该员工 wiki 工具的默认目标，不改变 KB 的归属或可见性。** 多个员工可以选同一个 KB 作主库，互不影响。
+
+请求示例：
+
+```bash
+# 设为某个 KB
+curl -X PUT http://localhost:18088/api/v1/agents/2055639185675730946 \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "X-Workspace-Id: 1" \
+  -H "Content-Type: application/json" \
+  -d '{"primaryKbId": "2054907618529591298", ...其余字段}'
+
+# 清空绑定
+curl -X PUT http://localhost:18088/api/v1/agents/2055639185675730946 \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "X-Workspace-Id: 1" \
+  -H "Content-Type: application/json" \
+  -d '{"primaryKbId": null, ...其余字段}'
 ```
 
 ---
@@ -121,6 +171,7 @@ POST   /api/v1/agents/templates/{id}   # 从模板创建
 GET    /api/v1/tools                               # 列表
 PUT    /api/v1/tools/{id}                          # 更新
 PUT    /api/v1/tools/{id}/toggle?enabled={bool}    # 开关
+PUT    /api/v1/tools/{id}/disclosure-tier          # 设置披露层级（core / extension）
 POST   /api/v1/tools/{name}/test                   # 直接测试
 ```
 
@@ -185,6 +236,28 @@ GET    /api/v1/wiki/pages/{id}/backlinks                 # 反向链接
 ```
 
 Agent 可调的 wiki 工具（`wiki_search`、`wiki_read`、`wiki_backlinks`）自动解析 `kbId`。
+
+### 员工绑定主知识库（1.5.0+）
+
+PR #237 / V130 迁移引入了员工的"主知识库"机制。新的端点：
+
+```
+GET /api/v1/wiki/knowledge-bases/bindable      # 列当前 workspace 可绑定为主库的 KB
+```
+
+返回的是当前 workspace 的**全部** KB（包含已被其他员工选作主库的），因为绑定语义是"我默认查哪一个"——不是独占。返回 shape 跟 `GET /api/v1/wiki/knowledge-bases`（按 workspace 列出）一致，单独命名只是为了在 UI 语义上更清晰。
+
+绑定动作本身**不走** wiki 接口，而是写在员工实体上：
+
+```
+PUT /api/v1/agents/{id}    # body 里带 primaryKbId 字段
+```
+
+字段语义、三态行为见上面 [Agent 段的 `primaryKbId` 说明](#字段-primarykbid150)。
+
+::: warning 旧字段 `kb.agentId` 的去留
+1.5.0 之前的版本曾把绑定关系写在 `mate_wiki_knowledge_base.agent_id` 上（一对一独占）。V130 迁移把旧值回填到了 `agent.primary_kb_id`，老字段保留作 fallback 读取——**`PUT /api/v1/wiki/knowledge-bases/{id}` 不再处理 `agentId` 字段**，传上去会被忽略。新代码请只通过 `agent.primaryKbId` 控制绑定。
+:::
 
 ---
 
@@ -323,6 +396,9 @@ GET    /api/v1/channels/health                                   # 聚合健康�
 
 GET    /api/v1/channels/webhook/weixin/qrcode                    # 微信 iLink 二维码
 GET    /api/v1/channels/webhook/weixin/qrcode/status             # 扫码状态
+
+POST   /api/v1/channels/qrcode/qq/begin                          # 发起 QQ 扫码绑定
+GET    /api/v1/channels/qrcode/qq/status                         # QQ 扫码绑定状态
 ```
 
 ### 渠道 webhook 回调
@@ -396,6 +472,19 @@ GET    /api/v1/triggers/{id}/events                     # 该 trigger 的事件�
 
 ---
 
+## 目标（1.4.0+）
+
+目标完成评分、自动跟进的行为细节见 [目标](./goals)。
+
+```
+POST   /api/v1/goals                                   # 新建目标
+GET    /api/v1/goals/{id}                               # 获取目标
+PATCH  /api/v1/goals/{id}                               # 更新目标（部分）
+GET    /api/v1/goals/{id}/events                        # 该目标的评估事件历史
+```
+
+---
+
 ## Token 用量
 
 ```
@@ -435,10 +524,27 @@ GET    /api/v1/workspaces/{id}                        # 获取
 POST   /api/v1/workspaces                             # 创建
 PUT    /api/v1/workspaces/{id}                        # 更新
 DELETE /api/v1/workspaces/{id}                        # 删除（仅 owner）
-GET    /api/v1/workspaces/{id}/members                # 列成员
-POST   /api/v1/workspaces/{id}/members                # 添加成员
-DELETE /api/v1/workspaces/{id}/members/{userId}       # 移除成员
-PUT    /api/v1/workspaces/{id}/members/{userId}/role  # 变更角色
+GET    /api/v1/workspaces/{id}/access                 # 当前用户访问信息（见下）
+```
+
+### 成员与 RBAC（1.4.0+）
+
+`/access` 返回调用者在该工作空间内的有效权限，前端据此渲染路由和菜单：
+
+```json
+{
+  "memberRole": "editor",
+  "isGlobalAdmin": false,
+  "effectiveRole": "editor",
+  "capabilities": ["workspace.read", "conversation.write", "..."]
+}
+```
+
+```
+GET    /api/v1/workspaces/{id}/members                  # 列成员
+POST   /api/v1/workspaces/{id}/members                  # 添加成员
+PUT    /api/v1/workspaces/{id}/members/{memberId}       # 更新成员（角色等）
+DELETE /api/v1/workspaces/{id}/members/{memberId}       # 移除成员
 ```
 
 ---

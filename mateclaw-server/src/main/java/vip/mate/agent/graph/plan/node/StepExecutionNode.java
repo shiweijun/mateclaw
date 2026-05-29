@@ -27,6 +27,7 @@ import vip.mate.agent.context.RuntimeContextInjector;
 import vip.mate.agent.graph.executor.ToolExecutionExecutor;
 import vip.mate.channel.web.ChatStreamTracker;
 import vip.mate.planning.service.PlanningService;
+import vip.mate.skill.runtime.SkillCatalogRenderer;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -60,6 +61,12 @@ public class StepExecutionNode implements NodeAction {
     private final String reasoningEffort;
     private final NodeStreamingChatHelper streamingHelper;
     private final long stepWallClockTimeoutMs;
+    /**
+     * Renders the {@code ## Skills} catalog at runtime. Null in legacy / test
+     * constructors — when null, no catalog segment is appended (the Plan path's
+     * pre-disclosure behavior of baking it into the system prompt is gone).
+     */
+    private final SkillCatalogRenderer skillCatalogRenderer;
 
     // private static final int MAX_TOOL_CALLS_PER_STEP = 50;
     /**
@@ -93,7 +100,20 @@ public class StepExecutionNode implements NodeAction {
                              ConversationWindowManager conversationWindowManager) {
         this(chatModel, toolSet, executor, planningService, streamTracker,
                 reasoningEffort, streamingHelper, conversationWindowManager,
-                STEP_WALL_CLOCK_TIMEOUT_MS);
+                null, STEP_WALL_CLOCK_TIMEOUT_MS);
+    }
+
+    /** Production constructor with the runtime skill-catalog renderer. */
+    public StepExecutionNode(ChatModel chatModel, AgentToolSet toolSet,
+                             ToolExecutionExecutor executor,
+                             PlanningService planningService,
+                             ChatStreamTracker streamTracker,
+                             String reasoningEffort, NodeStreamingChatHelper streamingHelper,
+                             ConversationWindowManager conversationWindowManager,
+                             SkillCatalogRenderer skillCatalogRenderer) {
+        this(chatModel, toolSet, executor, planningService, streamTracker,
+                reasoningEffort, streamingHelper, conversationWindowManager,
+                skillCatalogRenderer, STEP_WALL_CLOCK_TIMEOUT_MS);
     }
 
     /** Test-friendly overload — production callers use the default timeout. */
@@ -104,6 +124,19 @@ public class StepExecutionNode implements NodeAction {
                       String reasoningEffort, NodeStreamingChatHelper streamingHelper,
                       ConversationWindowManager conversationWindowManager,
                       long stepWallClockTimeoutMs) {
+        this(chatModel, toolSet, executor, planningService, streamTracker,
+                reasoningEffort, streamingHelper, conversationWindowManager,
+                null, stepWallClockTimeoutMs);
+    }
+
+    StepExecutionNode(ChatModel chatModel, AgentToolSet toolSet,
+                      ToolExecutionExecutor executor,
+                      PlanningService planningService,
+                      ChatStreamTracker streamTracker,
+                      String reasoningEffort, NodeStreamingChatHelper streamingHelper,
+                      ConversationWindowManager conversationWindowManager,
+                      SkillCatalogRenderer skillCatalogRenderer,
+                      long stepWallClockTimeoutMs) {
         this.chatModel = chatModel;
         this.toolSet = toolSet;
         this.executor = executor;
@@ -112,6 +145,7 @@ public class StepExecutionNode implements NodeAction {
         this.conversationWindowManager = conversationWindowManager;
         this.reasoningEffort = reasoningEffort;
         this.streamingHelper = streamingHelper;
+        this.skillCatalogRenderer = skillCatalogRenderer;
         this.stepWallClockTimeoutMs = stepWallClockTimeoutMs;
     }
 
@@ -495,6 +529,15 @@ public class StepExecutionNode implements NodeAction {
                 8. 每一步最多做一个必要的检查和一个必要的执行，不要无意义循环。
                 """;
         messages.add(new SystemMessage(enhancedSystemPrompt));
+        // Runtime skill catalog (rendered here instead of baked into the system
+        // prompt). The Plan path never pins per-run loads, so render with an
+        // empty loaded set — this reproduces the pre-disclosure DB ordering.
+        if (skillCatalogRenderer != null) {
+            String skillCatalog = skillCatalogRenderer.render(java.util.Set.of());
+            if (skillCatalog != null && !skillCatalog.isBlank()) {
+                messages.add(new SystemMessage(skillCatalog));
+            }
+        }
         // 注入运行时上下文（当前时间 + 工作目录 + 发起者上下文）
         messages.add(new UserMessage(
                 RuntimeContextInjector.buildContextMessage(workspaceBasePath, null, accessor.chatOrigin())));

@@ -5,6 +5,8 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import vip.mate.agent.model.AgentEntity;
+import vip.mate.agent.repository.AgentMapper;
 import vip.mate.wiki.job.model.WikiProcessingJobEntity;
 import vip.mate.wiki.model.WikiChunkEntity;
 import vip.mate.wiki.model.WikiKnowledgeBaseEntity;
@@ -36,6 +38,7 @@ public class WikiKnowledgeBaseService {
     private final WikiChunkMapper chunkMapper;
     private final WikiPageCitationMapper citationMapper;
     private final WikiProcessingJobMapper processingJobMapper;
+    private final AgentMapper agentMapper;
 
     /**
      * RFC-051 PR-2: optional system-page scaffold (overview / log). Marked
@@ -102,31 +105,41 @@ public class WikiKnowledgeBaseService {
     }
 
     /**
-     * 获取 Agent 可访问的知识库：Agent 专属 KB + 公共 KB（agent_id IS NULL）
+     * 获取 Agent 可访问的知识库。
+     * <p>
+     * Knowledge bases are workspace-shared. The agent's primary KB is stored
+     * on mate_agent.primary_kb_id and does not affect visibility.
      */
     public List<WikiKnowledgeBaseEntity> listByAgentId(Long agentId) {
-        return kbMapper.selectList(
-                new LambdaQueryWrapper<WikiKnowledgeBaseEntity>()
-                        .and(w -> w.eq(WikiKnowledgeBaseEntity::getAgentId, agentId)
-                                .or().isNull(WikiKnowledgeBaseEntity::getAgentId))
-                        .orderByDesc(WikiKnowledgeBaseEntity::getUpdateTime));
+        AgentEntity agent = getAgentOrNull(agentId);
+        if (agent == null || agent.getWorkspaceId() == null) {
+            return listAll();
+        }
+        return listByWorkspace(agent.getWorkspaceId());
     }
 
     /**
      * Resolve the single knowledge base an agent's wiki tools should operate on.
      * <p>
-     * Prefers a KB explicitly bound to the agent; a shared (agent-less) KB is
-     * only used as a fallback when the agent has no bound KB of its own. This
-     * matters because {@link #listByAgentId} also returns shared KBs, and a
-     * shared KB with a more recent {@code update_time} would otherwise win the
-     * {@code get(0)} pick over the agent's own KB. Within each tier the most
-     * recently updated KB wins. Returns {@code null} when the agent can reach
-     * no knowledge base at all.
+     * Prefers mate_agent.primary_kb_id when it points to a KB in the same
+     * workspace. For legacy rows that predate primary_kb_id, falls back to the
+     * old mate_wiki_knowledge_base.agent_id marker only when no primary is set.
+     * Otherwise the most recently updated workspace KB wins.
      */
     public WikiKnowledgeBaseEntity resolvePrimaryKb(Long agentId) {
+        AgentEntity agent = getAgentOrNull(agentId);
         List<WikiKnowledgeBaseEntity> kbs = listByAgentId(agentId);
         if (kbs.isEmpty()) {
             return null;
+        }
+        Long primaryKbId = agent != null ? agent.getPrimaryKbId() : null;
+        if (primaryKbId != null) {
+            for (WikiKnowledgeBaseEntity kb : kbs) {
+                if (primaryKbId.equals(kb.getId()) && sameWorkspace(agent, kb)) {
+                    return kb;
+                }
+            }
+            return kbs.get(0);
         }
         if (agentId != null) {
             for (WikiKnowledgeBaseEntity kb : kbs) {
@@ -136,6 +149,74 @@ public class WikiKnowledgeBaseService {
             }
         }
         return kbs.get(0);
+    }
+
+    private AgentEntity getAgentOrNull(Long agentId) {
+        if (agentId == null || agentMapper == null) {
+            return null;
+        }
+        return agentMapper.selectById(agentId);
+    }
+
+    private boolean sameWorkspace(AgentEntity agent, WikiKnowledgeBaseEntity kb) {
+        if (agent == null || kb == null || agent.getWorkspaceId() == null) {
+            return true;
+        }
+        return kb.getWorkspaceId() == null || agent.getWorkspaceId().equals(kb.getWorkspaceId());
+    }
+
+    /**
+     * Resolve a specific knowledge base by name, restricted to the agent's
+     * workspace-visible KB set. Used by wiki tools
+     * that accept an optional {@code kbName} parameter so the LLM can target
+     * a non-primary KB when the agent reaches more than one.
+     * <p>
+     * Match is exact and case-sensitive — the LLM is expected to copy the
+     * name verbatim from {@code wiki_list_kbs} output. Returns {@code null}
+     * when zero OR more than one KB matches the name; callers wanting to
+     * distinguish the two cases (so the LLM can be told to disambiguate by
+     * id) should call {@link #findAllByName} instead. The single-match
+     * convenience contract here keeps the legacy call sites simple.
+     */
+    public WikiKnowledgeBaseEntity findByName(Long agentId, String kbName) {
+        List<WikiKnowledgeBaseEntity> matches = findAllByName(agentId, kbName);
+        return matches.size() == 1 ? matches.get(0) : null;
+    }
+
+    /**
+     * All KBs visible to {@code agentId} whose name matches {@code kbName}
+     * exactly. Returns an empty list when the name is blank or no KB matches;
+     * returns >1 entries when the workspace has duplicate KB names (no DB
+     * unique constraint protects against this), in which case the caller
+     * MUST disambiguate (typically by surfacing a kbId-based picker to the
+     * LLM) rather than silently picking the first one.
+     */
+    public List<WikiKnowledgeBaseEntity> findAllByName(Long agentId, String kbName) {
+        if (kbName == null || kbName.isBlank()) {
+            return List.of();
+        }
+        List<WikiKnowledgeBaseEntity> out = new java.util.ArrayList<>();
+        for (WikiKnowledgeBaseEntity kb : listByAgentId(agentId)) {
+            if (kbName.equals(kb.getName())) {
+                out.add(kb);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Resolve a KB by id, but ONLY when it's in the agent's visibility set —
+     * a deliberate fail-closed gate so an LLM cannot pivot to an arbitrary KB
+     * by guessing or scraping an id from someone else's workspace.
+     */
+    public WikiKnowledgeBaseEntity findVisibleById(Long agentId, Long kbId) {
+        if (kbId == null) return null;
+        for (WikiKnowledgeBaseEntity kb : listByAgentId(agentId)) {
+            if (kbId.equals(kb.getId())) {
+                return kb;
+            }
+        }
+        return null;
     }
 
     public WikiKnowledgeBaseEntity getById(Long id) {
@@ -168,14 +249,13 @@ public class WikiKnowledgeBaseService {
     }
 
     @Transactional
-    public WikiKnowledgeBaseEntity update(Long id, String name, String description, Long agentId) {
+    public WikiKnowledgeBaseEntity update(Long id, String name, String description) {
         WikiKnowledgeBaseEntity entity = kbMapper.selectById(id);
         if (entity == null) {
             throw new IllegalArgumentException("Knowledge base not found: " + id);
         }
         if (name != null) entity.setName(name);
         if (description != null) entity.setDescription(description);
-        if (agentId != null) entity.setAgentId(agentId);
         kbMapper.updateById(entity);
         return entity;
     }
