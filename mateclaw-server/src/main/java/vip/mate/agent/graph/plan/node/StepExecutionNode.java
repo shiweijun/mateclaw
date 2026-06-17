@@ -90,6 +90,16 @@ public class StepExecutionNode implements NodeAction {
      * pathological cases where the agent appears frozen to the user.
      */
     private static final long STEP_WALL_CLOCK_TIMEOUT_MS = 10 * 60 * 1000L;
+
+    /**
+     * Max re-plans per graph run. When a step throws, the executor re-plans the
+     * remaining work around the failure instead of aborting the whole plan — a
+     * single transient tool error or one badly-scoped step no longer kills the
+     * task. Bounded so a step that fails every attempt can't re-plan forever;
+     * once exhausted the plan aborts as before. Kept small (the recursion
+     * ceiling already accommodates it) — raise with care.
+     */
+    private static final int MAX_REPLANS_PER_RUN = 1;
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     public StepExecutionNode(ChatModel chatModel, AgentToolSet toolSet,
@@ -167,6 +177,8 @@ public class StepExecutionNode implements NodeAction {
         vip.mate.agent.context.ChatOrigin chatOrigin =
                 state.<vip.mate.agent.context.ChatOrigin>value(MateClawStateKeys.CHAT_ORIGIN)
                         .orElse(vip.mate.agent.context.ChatOrigin.EMPTY);
+        String runtimeModelName = state.value(MateClawStateKeys.RUNTIME_MODEL_NAME, "");
+        String runtimeProviderId = state.value(MateClawStateKeys.RUNTIME_PROVIDER_ID, "");
 
         if (stepIndex >= steps.size()) {
             log.warn("[StepExecution] stepIndex {} >= steps.size() {}, skipping", stepIndex, steps.size());
@@ -196,7 +208,8 @@ public class StepExecutionNode implements NodeAction {
         planningService.updateSubPlanStatus(planId, stepIndex, "running");
 
         // 构建消息列表
-        List<Message> messages = buildStepMessages(accessor, step, systemPrompt, workspaceBasePath);
+        List<Message> messages = buildStepMessages(accessor, step, systemPrompt, workspaceBasePath,
+                runtimeModelName, runtimeProviderId);
 
         // 显式工具执行循环
         String finalResult = null;
@@ -219,6 +232,12 @@ public class StepExecutionNode implements NodeAction {
         // budget is gone.
         long stepStartedAtMs = System.currentTimeMillis();
         boolean wallClockExceeded = false;
+
+        // Signature-based progress detector: nudges the model to change strategy
+        // when a round stalls (repeated failures / identical results), and flags
+        // the step as stuck past a hard threshold so we re-plan instead of
+        // burning the whole tool-call budget and advancing with junk.
+        StepProgressTracker progressTracker = new StepProgressTracker();
 
         try {
             while (toolCallCount < MAX_TOOL_CALLS_PER_STEP) {
@@ -351,6 +370,30 @@ public class StepExecutionNode implements NodeAction {
                     break;
                 }
 
+                // Progress tracking: feed this round's tool results to the
+                // detector. A WARN-level stall injects a one-shot "change
+                // strategy" SystemMessage the model sees on its next call; a
+                // HALT-level stall stops the inner loop so the post-loop logic
+                // re-plans instead of spinning to the tool-call ceiling.
+                java.util.Map<String, String> idToArgs = new java.util.HashMap<>();
+                for (AssistantMessage.ToolCall tc : allToolCalls) {
+                    if (tc != null && tc.id() != null) {
+                        idToArgs.put(tc.id(), tc.arguments());
+                    }
+                }
+                for (ToolResponseMessage.ToolResponse tr : toolResponses) {
+                    var nudge = progressTracker.record(
+                            tr.name(), idToArgs.getOrDefault(tr.id(), ""), tr.responseData());
+                    if (nudge.isPresent()) {
+                        messages.add(new SystemMessage(nudge.get()));
+                    }
+                }
+                if (progressTracker.isStuck()) {
+                    log.warn("[StepExecution] Step {} stalled ({}); stopping inner loop to re-plan",
+                            stepIndex, progressTracker.haltReason());
+                    break;
+                }
+
                 // RFC-052: returnDirect short-circuit. Any direct tool in this
                 // step ends the plan immediately; the dispatcher routes via
                 // currentPhase=plan_aborted so no further LLM call happens.
@@ -416,6 +459,56 @@ public class StepExecutionNode implements NodeAction {
                         .build();
             }
 
+            // Step-failure recovery WITHOUT an exception: the inner loop ended
+            // with no usable result — stalled (repeated failures / identical
+            // results, flagged by the progress tracker), hit the wall-clock or
+            // tool-call ceiling, or returned an empty answer. Re-plan the
+            // remaining work around it instead of advancing dependent steps with
+            // junk. Shares PLAN_REPLAN_COUNT with the exception path; once the
+            // budget is spent we fall through to the legacy "complete with a
+            // failure note" path below so the plan still terminates.
+            boolean noUsableResult = progressTracker.isStuck()
+                    || finalResult == null || finalResult.isBlank();
+            int noProgressReplanCount = accessor.replanCount();
+            if (noUsableResult && noProgressReplanCount < MAX_REPLANS_PER_RUN) {
+                String reason = progressTracker.isStuck()
+                        ? "本步骤陷入停滞（" + progressTracker.haltReason() + "），未取得有效结果"
+                        : wallClockExceeded
+                            ? "本步骤超过最大耗时限制，未取得有效结果"
+                            : finalResult == null
+                                ? "本步骤超过最大工具调用次数，未取得有效结果"
+                                : "本步骤未产出有效结果";
+                planningService.updateSubPlanFailure(planId, stepIndex, reason);
+                planningService.markPlanFailed(planId, "步骤" + (stepIndex + 1) + "：" + reason);
+                events.add(GraphEventPublisher.stepCompleted(stepIndex, reason));
+                if (iterationEventsOn) {
+                    events.add(GraphEventPublisher.iterationEnd(stepIndex, "parent", null, reason.length(), 0));
+                }
+                events.add(new GraphEventPublisher.GraphEvent("plan_replan", Map.of(
+                        "failedStepIndex", stepIndex,
+                        "attempt", noProgressReplanCount + 1,
+                        "maxReplans", MAX_REPLANS_PER_RUN,
+                        "reason", reason), System.currentTimeMillis()));
+                log.warn("[StepExecution] Step {} produced no usable result ({}); re-planning (attempt {}/{})",
+                        stepIndex + 1, reason, noProgressReplanCount + 1, MAX_REPLANS_PER_RUN);
+                return PlanStateAccessor.output()
+                        .workingContext(buildReplanContext(accessor, stepIndex, reason))
+                        .currentPhase("plan_replan")
+                        .replanCount(noProgressReplanCount + 1)
+                        .planId(null)
+                        .planSteps(List.of())
+                        .planValid(false)
+                        .needsPlanning(true)
+                        .currentStepIndex(0)
+                        .currentStepTitle("")
+                        .currentStepResult("")
+                        .contentStreamed(false)
+                        .put(MateClawStateKeys.PROMPT_TOKENS, state.value(MateClawStateKeys.PROMPT_TOKENS, 0) + stepPromptTokens)
+                        .put(MateClawStateKeys.COMPLETION_TOKENS, state.value(MateClawStateKeys.COMPLETION_TOKENS, 0) + stepCompletionTokens)
+                        .events(events)
+                        .build();
+            }
+
             if (finalResult == null) {
                 if (wallClockExceeded) {
                     finalResult = "步骤执行超过最大耗时限制（"
@@ -436,6 +529,46 @@ public class StepExecutionNode implements NodeAction {
                 events.add(GraphEventPublisher.iterationEnd(stepIndex, "parent", null,
                         shortError != null ? shortError.length() : 0, 0));
             }
+
+            // Step-failure recovery: rather than aborting the whole plan on a
+            // single failed step, re-plan the remaining work around the failure
+            // (up to MAX_REPLANS_PER_RUN). Completed steps are preserved in
+            // WORKING_CONTEXT, so the next PlanGeneration pass can skip them and
+            // route around (or retry) what broke. The mid-pass plan state is
+            // cleared so a fresh plan is derived; PLAN_REPLAN_COUNT bounds the loop.
+            int replanCount = accessor.replanCount();
+            if (replanCount < MAX_REPLANS_PER_RUN) {
+                String replanContext = buildReplanContext(accessor, stepIndex, shortError);
+                events.add(new GraphEventPublisher.GraphEvent("plan_replan", Map.of(
+                        "failedStepIndex", stepIndex,
+                        "attempt", replanCount + 1,
+                        "maxReplans", MAX_REPLANS_PER_RUN,
+                        "error", shortError == null ? "" : shortError),
+                        System.currentTimeMillis()));
+                log.warn("[StepExecution] Step {} failed; re-planning remaining work (attempt {}/{})",
+                        stepIndex + 1, replanCount + 1, MAX_REPLANS_PER_RUN);
+                return PlanStateAccessor.output()
+                        .workingContext(replanContext)
+                        .currentPhase("plan_replan")
+                        .replanCount(replanCount + 1)
+                        // Wipe mid-pass plan state so PlanGenerationNode re-derives
+                        // a fresh plan from goal + (failure-augmented) context.
+                        .planId(null)
+                        .planSteps(List.of())
+                        .planValid(false)
+                        .needsPlanning(true)
+                        .currentStepIndex(0)
+                        .currentStepTitle("")
+                        .currentStepResult("")
+                        .contentStreamed(false)
+                        .put(MateClawStateKeys.PROMPT_TOKENS, state.value(MateClawStateKeys.PROMPT_TOKENS, 0) + stepPromptTokens)
+                        .put(MateClawStateKeys.COMPLETION_TOKENS, state.value(MateClawStateKeys.COMPLETION_TOKENS, 0) + stepCompletionTokens)
+                        .events(events)
+                        .build();
+            }
+
+            log.warn("[StepExecution] Step {} failed and re-plan budget exhausted ({}); aborting plan",
+                    stepIndex + 1, MAX_REPLANS_PER_RUN);
             return PlanStateAccessor.output()
                     .currentStepResult(shortError)
                     .currentPhase("plan_aborted")
@@ -510,7 +643,8 @@ public class StepExecutionNode implements NodeAction {
         return sb.toString();
     }
 
-    private List<Message> buildStepMessages(PlanStateAccessor accessor, String step, String systemPrompt, String workspaceBasePath) {
+    private List<Message> buildStepMessages(PlanStateAccessor accessor, String step, String systemPrompt,
+                                            String workspaceBasePath, String runtimeModelName, String runtimeProviderId) {
         List<Message> messages = new ArrayList<>();
 
         // Layer 1: System prompt（增强指令）
@@ -538,9 +672,10 @@ public class StepExecutionNode implements NodeAction {
                 messages.add(new SystemMessage(skillCatalog));
             }
         }
-        // 注入运行时上下文（当前时间 + 工作目录 + 发起者上下文）
+        // 注入运行时上下文（当前时间 + 工作目录 + 发起者上下文 + 模型身份）
         messages.add(new UserMessage(
-                RuntimeContextInjector.buildContextMessage(workspaceBasePath, null, accessor.chatOrigin())));
+                RuntimeContextInjector.buildContextMessage(
+                        workspaceBasePath, null, accessor.chatOrigin(), runtimeModelName, runtimeProviderId)));
 
         // Layer 2: Working context（对话历史 + 步骤结果的受控长度摘要）
         String workingContext = accessor.workingContext();
@@ -606,6 +741,30 @@ public class StepExecutionNode implements NodeAction {
             log.warn("[StepExecution] Failed to parse pre-approved payload: {}", e.getMessage());
             return false;
         }
+    }
+
+    /**
+     * Augment the working context with a note about the failed step so the next
+     * PlanGeneration pass re-plans around it. The completed-step results are
+     * already encoded in {@code WORKING_CONTEXT}; this appends only the failure
+     * so the planner can skip what's done, retry differently, or route around
+     * the broken step. The note is an internal LLM prompt (Chinese, matching the
+     * surrounding planning/execution prompts).
+     */
+    static String buildReplanContext(PlanStateAccessor accessor, int failedStepIndex, String error) {
+        List<String> steps = accessor.planSteps();
+        String failedTitle = (failedStepIndex >= 0 && failedStepIndex < steps.size())
+                ? steps.get(failedStepIndex) : ("步骤 " + (failedStepIndex + 1));
+        StringBuilder sb = new StringBuilder(accessor.workingContext());
+        if (sb.length() > 0) {
+            sb.append("\n\n");
+        }
+        sb.append("【上一轮计划执行失败】步骤 ").append(failedStepIndex + 1)
+          .append("（").append(failedTitle).append("）执行失败：")
+          .append(error == null ? "未知错误" : error)
+          .append("\n请基于上面已完成的工作，重新规划达成总目标所需的剩余步骤：")
+          .append("绕开或换一种方式完成失败的部分，不要重复已经完成的步骤。");
+        return sb.toString();
     }
 
     /**

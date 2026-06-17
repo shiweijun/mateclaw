@@ -49,6 +49,7 @@ public class AgentService {
     private final MemoryRecallTracker memoryRecallTracker;
     private final MemoryLifecycleMediator lifecycleMediator;
     private final MemoryProperties memoryProperties;
+    private final vip.mate.memory.identity.MemoryOwnerResolver memoryOwnerResolver;
     /** Read-only lookup of a conversation's pinned model. Mapper (not service)
      *  to keep this a leaf dependency with no risk of a bean cycle. */
     private final ConversationMapper conversationMapper;
@@ -504,6 +505,19 @@ public class AgentService {
         log.info("Agent caches refreshed after tool guard config change (denied tools may have changed)");
     }
 
+    /**
+     * Issue #289: an MCP server connecting / disconnecting / reconnecting
+     * changes the live tool set, but cached agents snapshot their tools at
+     * build time. Clear the cache so the next turn rebuilds against the
+     * current MCP tools instead of replying "from memory" with a stale,
+     * tool-less graph.
+     */
+    @EventListener
+    public void onMcpServerChanged(vip.mate.tool.mcp.event.McpServerChangedEvent event) {
+        refreshAllAgents();
+        log.info("Agent caches refreshed after MCP server change: {}", event.reason());
+    }
+
     // ==================== Lifecycle helpers ====================
 
     /**
@@ -518,7 +532,8 @@ public class AgentService {
         if (!memoryProperties.isLifecycleMediatorEnabled()) {
             return invoke.apply(message, conversationId);
         }
-        TurnContext ctx = new TurnContext(agentId, conversationId, conversationId, 0, message);
+        String ownerKey = memoryOwnerResolver.resolve(ChatOriginHolder.get());
+        TurnContext ctx = new TurnContext(agentId, conversationId, conversationId, 0, message, ownerKey);
         String memoryContext = lifecycleMediator.beforeLlmCall(ctx);
         // Inject memory context into the user message (RFC-037 §3.3)
         String enrichedMessage = injectMemoryContext(message, memoryContext);
@@ -540,7 +555,8 @@ public class AgentService {
         if (!memoryProperties.isLifecycleMediatorEnabled()) {
             return invoke.apply(message, conversationId);
         }
-        TurnContext ctx = new TurnContext(agentId, conversationId, conversationId, 0, message);
+        String ownerKey = memoryOwnerResolver.resolve(ChatOriginHolder.get());
+        TurnContext ctx = new TurnContext(agentId, conversationId, conversationId, 0, message, ownerKey);
         String memoryContext = lifecycleMediator.beforeLlmCall(ctx);
         String enrichedMessage = injectMemoryContext(message, memoryContext);
         StringBuilder reply = new StringBuilder();

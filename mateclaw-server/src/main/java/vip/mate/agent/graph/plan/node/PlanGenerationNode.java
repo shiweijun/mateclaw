@@ -16,8 +16,14 @@ import vip.mate.agent.graph.NodeStreamingChatHelper;
 import vip.mate.agent.graph.plan.state.PlanStateAccessor;
 import vip.mate.agent.graph.plan.state.PlanStateKeys;
 import vip.mate.agent.graph.state.MateClawStateKeys;
+import vip.mate.agent.context.ChatOrigin;
 import vip.mate.agent.context.ConversationWindowManager;
 import vip.mate.agent.context.RuntimeContextInjector;
+import vip.mate.goal.config.GoalProperties;
+import vip.mate.goal.model.GoalCreateRequest;
+import vip.mate.goal.model.GoalCriterion;
+import vip.mate.goal.model.GoalEntity;
+import vip.mate.goal.service.GoalService;
 import vip.mate.planning.service.PlanningService;
 
 import java.util.ArrayList;
@@ -52,6 +58,14 @@ public class PlanGenerationNode implements NodeAction {
     private final NodeStreamingChatHelper streamingHelper;
     private final ConversationWindowManager conversationWindowManager;
     private final AgentToolSet toolSet;
+    /** Optional — auto-derive a goal from the plan. Null disables the feature (legacy/test). */
+    private final GoalService goalService;
+    private final GoalProperties goalProperties;
+
+    /** Plan steps below this size are trivial tool tasks, not goal-worthy. */
+    private static final int MIN_STEPS_FOR_AUTO_GOAL = 2;
+    /** Cap the auto-derived goal title; the full request rides in the description. */
+    private static final int AUTO_GOAL_TITLE_MAX = 80;
 
     /**
      * Structured triage result — field names use @JsonProperty to match the
@@ -70,37 +84,119 @@ public class PlanGenerationNode implements NodeAction {
             硬性规则：
             1. 只返回一个 JSON 对象；不允许 markdown 代码块、不允许任何 JSON 以外的文字。
             2. 不要解释，不要寒暄，不要说"我来...""我先..."。
-            3. 不确定时优先选择"单步"，而不是拆成多步。
+            3. 判断依据是"目标是否由多个明显独立的子任务/交付物组成"，而不是难度高低：
+               单个连贯动作不要拆，但目标确实分成多个部分时也不要硬压成一步。
 
             三类分流：
 
-            (A) 直接回答 — 纯知识问答，模型凭自身知识即可回答，不需要任何工具、不需要读文件、不需要查询当前状态。
+            (A) 直接回答 — 简单的纯知识问答：凭自身知识用一两段话即可答完，不需要任何工具、不需要读文件、
+                不需要查询当前状态，且目标本身不包含多个需要分别完成的子任务。
+                （注意：成段的分析、对比、方案、规划、教程等通常不属于此类，应走 B 或 C。）
                 输出：{"needs_planning": false, "direct_answer": "<你的回答>"}
 
-            (B) 单步任务 — 需要工具，但本质是一个连贯动作（一次文件读取 / 一次搜索 / 一次命令 / 一次记忆读写 / 一次计算）。
-                执行器会在这一步内部迭代调用多次工具，你**不要**提前拆分。
+            (B) 单步任务 — 本质是一个连贯动作（一次文件读取 / 一次搜索 / 一次命令 / 一次记忆读写 / 一次计算 /
+                一段集中产出）。执行器会在这一步内部迭代调用多次工具，你**不要**提前拆分。
                 输出：{"needs_planning": true, "steps": ["<将用户目标复述为一句清晰可执行的指令>"]}
 
-            (C) 多步任务 — 用户目标包含 2 个及以上明显独立、必须先后完成的子任务（例如"先调研 A 再调研 B 然后对比"、
-                "读配置、迁移数据、验证结果"）。子任务之间如果可以合并，应当合并。
+            (C) 多步任务 — 用户目标包含 2 个及以上明显独立、需要先后完成的子任务或交付物（例如"先调研 A 再调研 B
+                然后对比"、"读配置、迁移数据、验证结果"、"分阶段制定计划"、"产出由若干独立部分组成的方案"）。
+                这是规划型智能体的主路径——当目标确实由多个部分组成时就走这里。
                 输出：{"needs_planning": true, "steps": ["步骤1", "步骤2", ...]}（2 到 6 个步骤）
 
             关键原则：
             - 单工具调用绝对不拆成多步。例："读 A 文件并总结" 是单步（B），不是两步。
             - 默认不要把 MEMORY.md / PROFILE.md / 技能文件读取当成独立步骤；仅当用户明确询问偏好、历史决策或长期约束时才加入。
             - 每个步骤必须是可执行动作，不写"思考一下""确认一下"之类的空话。
-            - 解析不出来时，视作(B) 单步；宁愿单步也不要无脑拆分。
+            - 多部分、多阶段、需要逐步推进的目标走(C)；真正单一原子动作走(B)；只有简单一问一答才用(A)。
             """;
+
+    /**
+     * Evidence gate — action signals in the USER GOAL. When triage returns
+     * direct_answer (A) but the goal contains any of these, the model almost
+     * certainly mis-routed a tool-requiring task; accepting the direct answer
+     * would end the turn without ever executing a tool ("复杂任务不执行就停止").
+     * <p>
+     * The gate is deliberately biased toward executing: a false positive only
+     * costs one extra executor pass (which still produces the answer, with or
+     * without tools), whereas a false negative silently drops the whole task.
+     * Intentionally excludes very common bare temporal words (现在/当前/最新)
+     * to avoid downgrading genuine knowledge Q&A on every occurrence.
+     */
+    private static final java.util.regex.Pattern GOAL_REQUIRES_EXECUTION = java.util.regex.Pattern.compile(
+            "读取|读一下|读一份|打开文件|查一下|检索|搜索|联网|下载|上传|抓取"
+            + "|记住|记一下|录入|保存|写入|存储|更新|删除|新建|创建|生成|画一[张幅]|画个"
+            + "|运行|执行|调用|跑一下|发送|发给|安排|提醒|预约"
+            + "|我的(记忆|文件|知识库|偏好|笔记|日程|目标)"
+            + "|你(现在|目前)?(挂载|加载|有哪些|支持哪些)|挂载了哪些|你的(技能|工具|MCP|插件)"
+            + "|帮我(做|改|查|建|写|发|跑|算|订|定|生成|整理|安排)"
+            + "|\\.(java|py|ts|js|vue|md|json|ya?ml|sql|csv|xml|txt|sh)\\b",
+            java.util.regex.Pattern.CASE_INSENSITIVE);
+
+    /**
+     * Evidence gate — execution-promise phrasing in the direct answer itself.
+     * The model says it WILL act ("我先去读取…", "接下来调用…") rather than
+     * actually answering, which means the "direct answer" is really a plan
+     * preamble that would terminate before the action runs. Scoped to a verb
+     * whitelist so a normal narrative opener like "我来介绍一下杭州" is NOT caught.
+     */
+    private static final java.util.regex.Pattern ANSWER_PROMISES_ACTION = java.util.regex.Pattern.compile(
+            "(我(先|这就|马上|稍后|接下来|现在)?(去|来)?|让我(先|来)?|接下来(我)?(会|要|将|需要)?|正在)"
+            + "(读取|读一下|查一下|查询|检索|搜索|联网|调用|执行|运行|获取|访问|查看一下"
+            + "|保存|记住|记录|写入|录入|创建|新建|生成|下载|上传|发送)");
+
+    /**
+     * Returns true when a triage {@code direct_answer} (A) should be overridden
+     * and routed through the executor as a single-step plan instead. Package-
+     * private and side-effect free so the gate's regex behavior is unit-testable
+     * without mocking the whole node.
+     *
+     * @param goal         the user goal
+     * @param directAnswer the answer the triage model produced (may be null)
+     */
+    static boolean shouldOverrideDirectAnswer(String goal, String directAnswer) {
+        String userAsk = stripInjectedContext(goal);
+        boolean goalNeedsExecution = userAsk != null && GOAL_REQUIRES_EXECUTION.matcher(userAsk).find();
+        boolean answerPromisesAction = directAnswer != null && ANSWER_PROMISES_ACTION.matcher(directAnswer).find();
+        return goalNeedsExecution || answerPromisesAction;
+    }
+
+    /**
+     * Strips the injected {@code <memory-context>…</memory-context>} wrapper that
+     * RuntimeContextInjector prepends to every goal, returning just the user's
+     * actual ask. Without this the gate matches on the injected memory/profile
+     * text (which contains filenames like {@code user.md} and memory keywords),
+     * firing on essentially every task and defeating the direct-answer fast path.
+     */
+    static String stripInjectedContext(String goal) {
+        if (goal == null) {
+            return null;
+        }
+        int end = goal.lastIndexOf("</memory-context>");
+        if (end >= 0) {
+            return goal.substring(end + "</memory-context>".length()).trim();
+        }
+        return goal;
+    }
 
     public PlanGenerationNode(ChatModel chatModel, PlanningService planningService,
                               NodeStreamingChatHelper streamingHelper,
                               ConversationWindowManager conversationWindowManager,
                               AgentToolSet toolSet) {
+        this(chatModel, planningService, streamingHelper, conversationWindowManager, toolSet, null, null);
+    }
+
+    public PlanGenerationNode(ChatModel chatModel, PlanningService planningService,
+                              NodeStreamingChatHelper streamingHelper,
+                              ConversationWindowManager conversationWindowManager,
+                              AgentToolSet toolSet,
+                              GoalService goalService, GoalProperties goalProperties) {
         this.chatModel = chatModel;
         this.planningService = planningService;
         this.streamingHelper = streamingHelper;
         this.conversationWindowManager = conversationWindowManager;
         this.toolSet = toolSet;
+        this.goalService = goalService;
+        this.goalProperties = goalProperties;
     }
 
     /**
@@ -108,7 +204,65 @@ public class PlanGenerationNode implements NodeAction {
      */
     @Deprecated
     public PlanGenerationNode(ChatModel chatModel, PlanningService planningService) {
-        this(chatModel, planningService, null, null, null);
+        this(chatModel, planningService, null, null, null, null, null);
+    }
+
+    /**
+     * Auto-derive a goal from a freshly-generated multi-step plan so the
+     * Plan-Execute path engages the goal subsystem (the planner / step executor
+     * never call {@code setGoal} themselves). The plan steps become the goal's
+     * acceptance criteria — the plan IS the decomposition — so the first
+     * evaluation skips the bootstrap round and judges those criteria directly.
+     *
+     * <p>Returns the created goal (to inject into {@code ACTIVE_GOAL} so THIS
+     * run's GoalEvaluationNode picks it up) or {@code null} when not applicable:
+     * feature off, fewer than {@link #MIN_STEPS_FOR_AUTO_GOAL} steps, no channel
+     * context, or the conversation already has an active goal. Best-effort —
+     * any failure is swallowed so planning is never blocked by goal bookkeeping.
+     */
+    GoalEntity maybeAutoCreateGoal(PlanStateAccessor accessor, List<String> steps) {
+        if (goalService == null || goalProperties == null
+                || !goalProperties.isEnabled() || !goalProperties.isAutoGoalFromPlan()) {
+            return null;
+        }
+        if (steps == null || steps.size() < MIN_STEPS_FOR_AUTO_GOAL) {
+            return null;
+        }
+        ChatOrigin origin = accessor.chatOrigin();
+        String convId = origin.conversationId();
+        if (convId == null || convId.isBlank() || origin.agentId() == null) {
+            return null;
+        }
+        try {
+            if (goalService.findActiveByConversation(convId) != null) {
+                return null; // respect an existing goal (incl. re-plan passes)
+            }
+            String request = stripInjectedContext(accessor.goal()).strip();
+            GoalCreateRequest req = new GoalCreateRequest();
+            req.setConversationId(convId);
+            req.setAgentId(origin.agentId());
+            req.setWorkspaceId(origin.workspaceId() != null ? origin.workspaceId() : 1L);
+            req.setTitle(request.isEmpty() ? "多步任务"
+                    : request.length() > AUTO_GOAL_TITLE_MAX
+                        ? request.substring(0, AUTO_GOAL_TITLE_MAX) : request);
+            req.setDescription(request);
+            List<GoalCriterion> criteria = steps.stream()
+                    .filter(s -> s != null && !s.isBlank())
+                    .map(s -> new GoalCriterion("", s.strip(), false, ""))
+                    .collect(Collectors.toList());
+            if (!criteria.isEmpty()) {
+                req.setCriteria(criteria);
+            }
+            String username = origin.requesterId() != null && !origin.requesterId().isBlank()
+                    ? origin.requesterId() : "system";
+            GoalEntity created = goalService.create(req, username);
+            log.info("[PlanGeneration] Auto-derived goal {} from plan ({} criteria) for conversation {}",
+                    created.getId(), criteria.size(), convId);
+            return created;
+        } catch (Exception e) {
+            log.warn("[PlanGeneration] Auto-goal-from-plan skipped (non-fatal): {}", e.toString());
+            return null;
+        }
     }
 
     @Override
@@ -165,8 +319,11 @@ public class PlanGenerationNode implements NodeAction {
             vip.mate.agent.context.ChatOrigin chatOrigin =
                     state.<vip.mate.agent.context.ChatOrigin>value(MateClawStateKeys.CHAT_ORIGIN)
                             .orElse(vip.mate.agent.context.ChatOrigin.EMPTY);
+            String runtimeModelName = state.value(MateClawStateKeys.RUNTIME_MODEL_NAME, "");
+            String runtimeProviderId = state.value(MateClawStateKeys.RUNTIME_PROVIDER_ID, "");
             promptMessages.add(new UserMessage(
-                    RuntimeContextInjector.buildContextMessage(workspaceBasePath, null, chatOrigin)));
+                    RuntimeContextInjector.buildContextMessage(
+                            workspaceBasePath, null, chatOrigin, runtimeModelName, runtimeProviderId)));
 
             // Advertise available tools so the LLM can recognize when an action is possible,
             // but do NOT force "any tool usage implies multi-step" — single-hop tool use
@@ -243,6 +400,31 @@ public class PlanGenerationNode implements NodeAction {
                 // Category (A): direct answer — push to client and terminate via DirectAnswerNode.
                 String directAnswer = triage != null && triage.directAnswer() != null
                         ? triage.directAnswer() : llmResponse;
+
+                // Evidence gate: catch a mis-routed A that actually needs tools.
+                // Downgrading to a single-step plan keeps tool access; the cost of
+                // a false positive is one extra executor pass, while a missed
+                // misroute drops the whole task silently.
+                if (shouldOverrideDirectAnswer(goal, directAnswer)) {
+                    log.warn("[PlanGeneration] Evidence gate overrode direct-answer route; "
+                            + "downgrading to single-step plan so tools can execute (goal: {})",
+                            goal.length() > 60 ? goal.substring(0, 60) + "..." : goal);
+                    List<String> gatedSteps = List.of(goal);
+                    var gatedPlan = planningService.createPlan(agentId, goal, gatedSteps);
+                    events.add(GraphEventPublisher.planCreated(gatedPlan.getId(), gatedSteps));
+                    return PlanStateAccessor.output()
+                            .needsPlanning(true)
+                            .planId(gatedPlan.getId())
+                            .planSteps(gatedSteps)
+                            .planValid(true)
+                            .currentStepIndex(0)
+                            .currentPhase("plan_generated")
+                            .thinkingStreamed(!result.thinking().isEmpty())
+                            .mergeUsage(state, result)
+                            .events(events)
+                            .build();
+                }
+
                 log.info("[PlanGeneration] Direct-answer route taken (no tools, no planning)");
 
                 streamingHelper.broadcastContent(conversationId, directAnswer);
@@ -275,7 +457,22 @@ public class PlanGenerationNode implements NodeAction {
 
             events.add(GraphEventPublisher.planCreated(plan.getId(), steps));
 
-            return PlanStateAccessor.output()
+            // Auto-derive a goal from a genuine multi-step plan so the
+            // Plan-Execute path engages the goal subsystem. Injected into
+            // ACTIVE_GOAL so this same run's GoalEvaluationNode evaluates it.
+            GoalEntity autoGoal = maybeAutoCreateGoal(accessor, steps);
+            if (autoGoal != null && goalService != null) {
+                // Surface it to the UI exactly like the setGoal tool does
+                // ({goalId, conversationId, goal}) so the goal panel hydrates
+                // even though the user never called setGoal. Same SSE event the
+                // frontend goal store already listens for.
+                events.add(new GraphEventPublisher.GraphEvent("goal_created", Map.of(
+                        "goalId", String.valueOf(autoGoal.getId()),
+                        "conversationId", conversationId,
+                        "goal", goalService.toResponse(autoGoal)), System.currentTimeMillis()));
+            }
+
+            PlanStateAccessor.OutputBuilder planOut = PlanStateAccessor.output()
                     .needsPlanning(true)
                     .planId(plan.getId())
                     .planSteps(steps)
@@ -285,8 +482,11 @@ public class PlanGenerationNode implements NodeAction {
                     .contentStreamed(true)
                     .thinkingStreamed(!result.thinking().isEmpty())
                     .mergeUsage(state, result)
-                    .events(events)
-                    .build();
+                    .events(events);
+            if (autoGoal != null) {
+                planOut.put(MateClawStateKeys.ACTIVE_GOAL, autoGoal);
+            }
+            return planOut.build();
 
         } catch (Exception e) {
             log.error("[PlanGeneration] Triage failed, falling back to single-step plan: {}", e.getMessage(), e);

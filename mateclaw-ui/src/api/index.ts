@@ -644,6 +644,14 @@ export const settingsApi = {
     http.put('/settings/sidecar', data),
 }
 
+// ==================== Global outbound proxy ====================
+export const proxyApi = {
+  get: () => http.get('/settings/proxy'),
+  update: (data: { enabled: boolean; url: string; nonProxyHosts?: string }) =>
+    http.put('/settings/proxy', data),
+  test: (url: string) => http.post('/settings/proxy/test', { url }),
+}
+
 // ==================== Workspace ====================
 const encodeFilePath = (filename: string) =>
   filename.split('/').map(encodeURIComponent).join('/')
@@ -758,7 +766,7 @@ export const wikiApi = {
     http.put(`/wiki/knowledge-bases/${id}/config`, { content }),
 
   // Directory Scan
-  setSourceDirectory: (id: number, path: string) =>
+  setSourceDirectory: (id: string | number, path: string) =>
     http.put(`/wiki/knowledge-bases/${id}/source-directory`, { path }),
   scanDirectory: (id: number) => http.post(`/wiki/knowledge-bases/${id}/scan`),
 
@@ -838,6 +846,16 @@ export const wikiApi = {
   getPageCitations: (kbId: number | string, pageId: number | string) =>
     http.get(`/wiki/kb/${kbId}/pages/${pageId}/citations`),
 
+  // Entity-level knowledge graph
+  listEntities: (kbId: number | string, params?: { type?: string; limit?: number }) =>
+    http.get(`/wiki/kb/${kbId}/entities`, { params }),
+  getEntityGraph: (kbId: number | string, limit = 150) =>
+    http.get(`/wiki/kb/${kbId}/entity-graph`, { params: { limit } }),
+  getEntityEgo: (kbId: number | string, entityId: number | string, limit = 50) =>
+    http.get(`/wiki/kb/${kbId}/entities/${entityId}/graph`, { params: { limit } }),
+  extractEntities: (kbId: number | string, force = false) =>
+    http.post(`/wiki/kb/${kbId}/entities/extract`, null, { params: { force } }),
+
   // RFC-030: Jobs
   getWikiJobs: (kbId: number, rawId: number) =>
     http.get(`/wiki/kb/${kbId}/jobs`, { params: { rawId } }),
@@ -871,6 +889,7 @@ export const wikiApi = {
     outputTarget?: 'none' | 'page'
     outputFormat?: 'markdown' | 'json'
     outputSchema?: string | null
+    targetPageType?: string | null
   }) =>
     http.post('/wiki/transformations', data),
   updateTransformation: (id: number, data: {
@@ -883,6 +902,7 @@ export const wikiApi = {
     outputTarget?: 'none' | 'page'
     outputFormat?: 'markdown' | 'json'
     outputSchema?: string | null
+    targetPageType?: string | null
   }) =>
     http.put(`/wiki/transformations/${id}`, data),
   deleteTransformation: (id: number) =>
@@ -903,6 +923,55 @@ export const wikiApi = {
     http.post(`/wiki/transformations/runs/${runId}/save-as-page`),
   cancelTransformationRun: (runId: number) =>
     http.post(`/wiki/transformations/runs/${runId}/cancel`),
+
+  // ---- PageType Profile (REQ-1) ----
+  getPageTypeProfile: (kbId: string | number) =>
+    http.get(`/wiki/knowledge-bases/${kbId}/page-type-profile`),
+  savePageTypeProfile: (kbId: string | number, config: string, name?: string) =>
+    http.put(`/wiki/knowledge-bases/${kbId}/page-type-profile`, { config, name }),
+  validatePageTypeProfile: (kbId: string | number, config: string) =>
+    http.post(`/wiki/knowledge-bases/${kbId}/page-type-profile/validate`, { config }),
+  resetPageTypeProfile: (kbId: string | number) =>
+    http.post(`/wiki/knowledge-bases/${kbId}/page-type-profile/reset-default`),
+  reclassifyKB: (kbId: string | number, modelId?: string | number | null) =>
+    http.post(`/wiki/knowledge-bases/${kbId}/reclassify`, modelId != null ? { modelId } : {}),
+
+  // ---- Agent pageType permissions (REQ-3) ----
+  listPageTypePermissions: (kbId: string | number, agentId: string | number) =>
+    http.get(`/wiki/knowledge-bases/${kbId}/agents/${agentId}/page-type-permissions`),
+  savePageTypePermission: (kbId: string | number, agentId: string | number, row: {
+    pageType: string
+    canRead?: number
+    canCreate?: number
+    canUpdate?: number
+    canDelete?: number
+    writePolicy?: 'allow' | 'deny' | 'approval_required'
+  }) =>
+    http.post(`/wiki/knowledge-bases/${kbId}/agents/${agentId}/page-type-permissions`, row),
+  deletePageTypePermission: (kbId: string | number, agentId: string | number, id: string | number) =>
+    http.delete(`/wiki/knowledge-bases/${kbId}/agents/${agentId}/page-type-permissions/${id}`),
+
+  // ---- Source watcher (REQ-4) ----
+  getSourceWatcher: (kbId: string | number) =>
+    http.get(`/wiki/knowledge-bases/${kbId}/source-watcher`),
+  triggerSourceWatcher: (kbId: string | number) =>
+    http.post(`/wiki/knowledge-bases/${kbId}/source-watcher/scan`),
+  setWatcherEnabled: (kbId: string | number, enabled: boolean) =>
+    http.put(`/wiki/knowledge-bases/${kbId}/source-watcher/enabled`, { enabled }),
+
+  // ---- Pipelines (REQ-5) ----
+  listPipelines: (kbId: string | number) =>
+    http.get(`/wiki/knowledge-bases/${kbId}/pipelines`),
+  savePipeline: (kbId: string | number, config: string, format: 'yaml' | 'json' = 'yaml') =>
+    http.post(`/wiki/knowledge-bases/${kbId}/pipelines`, { config, format }),
+  validatePipeline: (kbId: string | number, config: string, format: 'yaml' | 'json' = 'yaml') =>
+    http.post(`/wiki/knowledge-bases/${kbId}/pipelines/validate`, { config, format }),
+  deletePipeline: (kbId: string | number, id: string | number) =>
+    http.delete(`/wiki/knowledge-bases/${kbId}/pipelines/${id}`),
+  listPipelineRuns: (kbId: string | number, id: string | number) =>
+    http.get(`/wiki/knowledge-bases/${kbId}/pipelines/${id}/runs`),
+  getPipelineRun: (kbId: string | number, runId: string | number) =>
+    http.get(`/wiki/knowledge-bases/${kbId}/pipeline-runs/${runId}`),
 }
 
 // ==================== Workspace (Team) ====================
@@ -935,8 +1004,12 @@ export const agentBindingApi = {
     http.get(`/agents/${agentId}/provider-preferences`),
   setProviderPreferences: (agentId: string | number, providerIds: string[]) =>
     http.put(`/agents/${agentId}/provider-preferences`, providerIds),
-  listKnowledgeBases: (agentId: string | number) => http.get(`/agents/${agentId}/knowledge-bases`),
-  setKnowledgeBases: (agentId: string | number, kbIds: number[]) => http.put(`/agents/${agentId}/knowledge-bases`, kbIds),
+  // Per-agent knowledge base access scope. Empty array = unrestricted
+  // (agent can reach every KB in its workspace). IDs are kept as strings
+  // for the Snowflake-precision contract.
+  listKbs: (agentId: string | number) => http.get(`/agents/${agentId}/kbs`),
+  setKbs: (agentId: string | number, kbIds: (string | number)[]) =>
+    http.put(`/agents/${agentId}/kbs`, kbIds),
 }
 
 // ==================== Dashboard ====================
@@ -1234,12 +1307,21 @@ export const triggerApi = {
   }) => http.post('/triggers/events', envelope),
 }
 
-// ==================== Persistent goals (RFC 48) ====================
+// ==================== Persistent goals ====================
 //
 // Snowflake IDs are sent as strings end-to-end — the backend's
 // ToStringSerializer makes responses strings, and request payloads keep
 // them as strings to dodge JS Number precision loss. See CLAUDE.md
 // "ID Handling — Snowflake Precision Convention".
+
+/** One checkable item of a goal's exit checklist. */
+export interface GoalCriterion {
+  id: string
+  text: string
+  passed: boolean
+  evidence?: string
+}
+
 export interface Goal {
   id: string
   conversationId: string
@@ -1255,6 +1337,7 @@ export interface Goal {
   llmCallBudget: number
   agentLlmCallsUsed: number
   evalLlmCallsUsed: number
+  totalLlmCallsUsed?: number
   progressSummary?: string | null
   completionScore?: number | null
   lastEvaluationAt?: string | null
@@ -1263,6 +1346,8 @@ export interface Goal {
   lastFollowupAt?: string | null
   createTime: string
   updateTime: string
+  /** Parsed checklist; the backend always sends an array (empty when none). */
+  criteria: GoalCriterion[]
 }
 
 export interface GoalEvent {
@@ -1286,6 +1371,7 @@ export const goalApi = {
     llmCallBudget?: number
     autoFollowupEnabled?: boolean
     followupCooldownSeconds?: number
+    criteria?: { text: string }[]
   }) => http.post<Goal>('/goals', data),
 
   findActive: (conversationId: string) =>
@@ -1349,4 +1435,27 @@ export const approvalApi = {
     conversationId?: string
     limit?: number
   }) => http.get<ResolutionLog[]>('/approval/resolutions', { params }),
+}
+
+// ==================== 内置帮助文档 ====================
+
+export interface DocMeta {
+  slug: string
+  title: string
+}
+
+export interface DocContent {
+  slug: string
+  title: string
+  content: string
+}
+
+export const docsApi = {
+  /** 列出某语言下的全部帮助文档（slug + 标题）。 */
+  list: (lang: string) =>
+    http.get<DocMeta[]>('/docs', { params: { lang } }),
+
+  /** 读取单篇文档正文（已剥离 frontmatter）。 */
+  content: (lang: string, slug: string) =>
+    http.get<DocContent>('/docs/content', { params: { lang, slug } }),
 }

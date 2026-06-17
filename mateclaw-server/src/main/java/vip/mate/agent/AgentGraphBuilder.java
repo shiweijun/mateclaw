@@ -88,6 +88,11 @@ public class AgentGraphBuilder {
     @org.springframework.beans.factory.annotation.Value(
             "${mateclaw.skill.disclosure.load-skill-tool.enabled:true}")
     private boolean loadSkillToolEnabled;
+
+    /** Escape hatch: when false, the final answer is sent verbatim without Markdown normalization. */
+    @org.springframework.beans.factory.annotation.Value(
+            "${mate.agent.markdown-normalize-enabled:true}")
+    private boolean markdownNormalizeEnabled;
     private final ConversationService conversationService;
     private final ModelConfigService modelConfigService;
     private final ModelProviderService modelProviderService;
@@ -198,6 +203,17 @@ public class AgentGraphBuilder {
     }
 
     /**
+     * True when the Agent declared its own modelName and that name resolved to
+     * a real enabled row (rather than silently falling back to the system default).
+     */
+    private boolean agentModelOverrideResolved(AgentEntity entity, ModelConfigEntity resolved) {
+        if (entity == null || resolved == null) return false;
+        String agentModelName = entity.getModelName();
+        if (agentModelName == null || agentModelName.isBlank()) return false;
+        return agentModelName.equalsIgnoreCase(resolved.getModelName());
+    }
+
+    /**
      * 根据 AgentEntity 构建完整的 Agent 实例。
      *
      * <p>{@code modelProvider} / {@code modelName} carry an optional
@@ -243,14 +259,17 @@ public class AgentGraphBuilder {
         // Agents and conversations without an explicit choice.
         ModelConfigEntity globalDefault;
         boolean explicitPinHonoured;
+        boolean agentOverrideHonoured;
         try {
             explicitPinHonoured = pinResolvesToEnabledModel(modelProvider, modelName);
             globalDefault = resolveRuntimeBaseModel(modelProvider, modelName, entity.getModelName());
+            agentOverrideHonoured = !explicitPinHonoured
+                    && agentModelOverrideResolved(entity, globalDefault);
         } catch (Exception e) {
             throw new MateClawException("err.agent.no_default_model", "无法构建 Agent：请先在「设置 → 模型」中配置并启用默认模型");
         }
         ModelConfigEntity runtimeModel;
-        if (explicitPinHonoured) {
+        if (explicitPinHonoured || agentOverrideHonoured) {
             // The caller (admin UI / chat console) handed us a concrete
             // (provider, model) pin and it points to an enabled row. Honour
             // it verbatim — running providerRouter.selectPrimary here would
@@ -535,7 +554,7 @@ public class AgentGraphBuilder {
             if (auditEventService != null) {
                 executor.setAuditEventService(auditEventService);
             }
-            PlanGenerationNode planGenerationNode = new PlanGenerationNode(chatModel, planningService, streamingHelper, conversationWindowManager, toolSet);
+            PlanGenerationNode planGenerationNode = new PlanGenerationNode(chatModel, planningService, streamingHelper, conversationWindowManager, toolSet, goalService, goalProperties);
             StepExecutionNode stepExecutionNode = new StepExecutionNode(chatModel, toolSet, executor, planningService, streamTracker, reasoningEffort, streamingHelper, conversationWindowManager, skillCatalogRenderer);
             PlanSummaryNode planSummaryNode = new PlanSummaryNode(chatModel, planningService, streamingHelper);
             DirectAnswerNode directAnswerNode = new DirectAnswerNode();
@@ -560,6 +579,7 @@ public class AgentGraphBuilder {
                     .addStrategy(PlanStateKeys.CURRENT_STEP_TITLE, KeyStrategy.REPLACE)
                     .addStrategy(PlanStateKeys.CURRENT_STEP_RESULT, KeyStrategy.REPLACE)
                     .addStrategy(PlanStateKeys.COMPLETED_RESULTS, KeyStrategy.APPEND)
+                    .addStrategy(PlanStateKeys.PLAN_REPLAN_COUNT, KeyStrategy.REPLACE)
                     .addStrategy(PlanStateKeys.FINAL_SUMMARY, KeyStrategy.REPLACE)
                     .addStrategy(PlanStateKeys.DIRECT_ANSWER, KeyStrategy.REPLACE)
                     // 工作上下文（REPLACE 策略，每次重新生成）
@@ -624,6 +644,7 @@ public class AgentGraphBuilder {
                     .addStrategy(MateClawStateKeys.GOAL_EVALUATED_THIS_RUN, KeyStrategy.REPLACE)
                     .addStrategy(MateClawStateKeys.GOAL_FOLLOWUP_COUNT, KeyStrategy.REPLACE)
                     .addStrategy(MateClawStateKeys.GOAL_ACCOUNTED_LLM_CALL_COUNT, KeyStrategy.REPLACE)
+                    .addStrategy(MateClawStateKeys.GOAL_HARD_CONTINUATION_COUNT, KeyStrategy.REPLACE)
                     // Skill progressive disclosure — pinned skills loaded this
                     // run. Registered in BOTH graphs so the read-merge-write in
                     // ActionNode is not dropped on multi-node merges.
@@ -638,6 +659,7 @@ public class AgentGraphBuilder {
             //   ├→ DIRECT_ANSWER_NODE → END
             //   └→ STEP_EXECUTION → (StepProgressDispatcher)
             //       ├→ STEP_EXECUTION (loop)
+            //       ├→ PLAN_GENERATION (re-plan on step failure, bounded by PLAN_REPLAN_COUNT)
             //       └→ PLAN_SUMMARY → (active goal?)
             //                          ├→ GOAL_EVALUATION → (followup?)
             //                          │                     ├→ PLAN_GENERATION (re-plan)
@@ -671,11 +693,18 @@ public class AgentGraphBuilder {
                             Map.of(
                                     PlanStateKeys.STEP_EXECUTION_NODE, PlanStateKeys.STEP_EXECUTION_NODE,
                                     PlanStateKeys.PLAN_SUMMARY_NODE, PlanStateKeys.PLAN_SUMMARY_NODE,
+                                    // Step-failure recovery: re-plan the remaining work
+                                    // (StepProgressDispatcher returns this on phase=plan_replan).
+                                    PlanStateKeys.PLAN_GENERATION_NODE, PlanStateKeys.PLAN_GENERATION_NODE,
                                     StateGraph.END, StateGraph.END))
                     .addConditionalEdges(PlanStateKeys.PLAN_SUMMARY_NODE,
                             AsyncEdgeAction.edge_async(state -> {
                                 MateClawStateAccessor a = new MateClawStateAccessor(state);
-                                boolean hasGoal = a.hasActiveGoal();
+                                // Same-turn activation: fall back to a DB lookup (gated on the
+                                // feature flag) so a goal the agent set THIS turn is evaluated now,
+                                // not only from the next message. See GoalEvaluationNode.resolveActiveGoal.
+                                boolean hasGoal = goalProperties.isEnabled()
+                                        && GoalEvaluationNode.resolveActiveGoal(state, goalService).isPresent();
                                 boolean already = a.goalEvaluatedThisRun();
                                 return (hasGoal && !already)
                                         ? MateClawStateKeys.GOAL_EVALUATION_NODE
@@ -700,7 +729,11 @@ public class AgentGraphBuilder {
                     .addConditionalEdges(PlanStateKeys.DIRECT_ANSWER_NODE,
                             AsyncEdgeAction.edge_async(state -> {
                                 MateClawStateAccessor a = new MateClawStateAccessor(state);
-                                boolean hasGoal = a.hasActiveGoal();
+                                // Same-turn activation: fall back to a DB lookup (gated on the
+                                // feature flag) so a goal the agent set THIS turn is evaluated now,
+                                // not only from the next message. See GoalEvaluationNode.resolveActiveGoal.
+                                boolean hasGoal = goalProperties.isEnabled()
+                                        && GoalEvaluationNode.resolveActiveGoal(state, goalService).isPresent();
                                 boolean already = a.goalEvaluatedThisRun();
                                 return (hasGoal && !already)
                                         ? MateClawStateKeys.GOAL_EVALUATION_NODE
@@ -737,9 +770,17 @@ public class AgentGraphBuilder {
      * and tool-result chunking. Decoupled from the per-agent value so a small
      * {@code max_iterations} can never accidentally re-introduce the silent
      * killer.
+     * <p>
+     * The base segment budget is further multiplied to cover goal-driven "hard
+     * continuations" — each grants a fresh full iteration budget after a
+     * max-iterations turn (see {@code GoalEvaluationNode}). One run can perform
+     * up to {@link vip.mate.goal.config.GoalProperties#MAX_HARD_CONTINUATIONS_CEILING} of them, so
+     * the ceiling is sized for {@code (1 + CEILING)} segments to keep the
+     * recursion guard from tripping before the soft caps do.
      */
     private static int frameworkRecursionLimit() {
-        return (BaseAgent.MAX_ITERATIONS_HARD_CEILING + 5) * 4 + 100;
+        int perSegment = (BaseAgent.MAX_ITERATIONS_HARD_CEILING + 5) * 4;
+        return perSegment * (1 + vip.mate.goal.config.GoalProperties.MAX_HARD_CONTINUATIONS_CEILING) + 100;
     }
 
     CompiledGraph buildReActGraph(AgentToolSet toolSet, ChatModel chatModel, int maxIterations, String reasoningEffort) {
@@ -795,7 +836,7 @@ public class AgentGraphBuilder {
             SummarizingNode summarizingNode = new SummarizingNode(chatModel, streamingHelper, streamTracker);
             LimitExceededNode limitExceededNode = new LimitExceededNode(
                     chatModel, observationProcessor, streamingHelper, i18nService, progressLedgerService);
-            FinalAnswerNode finalAnswerNode = new FinalAnswerNode(generatedFileCache);
+            FinalAnswerNode finalAnswerNode = new FinalAnswerNode(generatedFileCache, markdownNormalizeEnabled);
 
             KeyStrategyFactory keyStrategyFactory = KeyStrategy.builder()
                     // 输入字段
@@ -807,6 +848,7 @@ public class AgentGraphBuilder {
                     .addStrategy(MateClawStateKeys.MESSAGES, KeyStrategy.APPEND)
                     // 迭代控制
                     .addStrategy(MateClawStateKeys.CURRENT_ITERATION, KeyStrategy.REPLACE)
+                    .addStrategy(MateClawStateKeys.ITERATION_REFUND_COUNT, KeyStrategy.REPLACE)
                     .addStrategy(MateClawStateKeys.MAX_ITERATIONS, KeyStrategy.REPLACE)
                     // 工具调用
                     .addStrategy(MateClawStateKeys.TOOL_CALLS, KeyStrategy.REPLACE)
@@ -888,6 +930,7 @@ public class AgentGraphBuilder {
                     .addStrategy(MateClawStateKeys.GOAL_EVALUATED_THIS_RUN, KeyStrategy.REPLACE)
                     .addStrategy(MateClawStateKeys.GOAL_FOLLOWUP_COUNT, KeyStrategy.REPLACE)
                     .addStrategy(MateClawStateKeys.GOAL_ACCOUNTED_LLM_CALL_COUNT, KeyStrategy.REPLACE)
+                    .addStrategy(MateClawStateKeys.GOAL_HARD_CONTINUATION_COUNT, KeyStrategy.REPLACE)
                     // Skill progressive disclosure — pinned skills loaded this
                     // run. Registered in BOTH graphs so the read-merge-write in
                     // ActionNode is not dropped on multi-node merges.
@@ -937,7 +980,11 @@ public class AgentGraphBuilder {
                     .addConditionalEdges(MateClawStateKeys.FINAL_ANSWER_NODE,
                             AsyncEdgeAction.edge_async(state -> {
                                 MateClawStateAccessor a = new MateClawStateAccessor(state);
-                                boolean hasGoal = a.hasActiveGoal();
+                                // Same-turn activation: fall back to a DB lookup (gated on the
+                                // feature flag) so a goal the agent set THIS turn is evaluated now,
+                                // not only from the next message. See GoalEvaluationNode.resolveActiveGoal.
+                                boolean hasGoal = goalProperties.isEnabled()
+                                        && GoalEvaluationNode.resolveActiveGoal(state, goalService).isPresent();
                                 boolean already = a.goalEvaluatedThisRun();
                                 return (hasGoal && !already)
                                         ? MateClawStateKeys.GOAL_EVALUATION_NODE
@@ -1301,6 +1348,23 @@ public class AgentGraphBuilder {
 
     // ==================== Prompt 构建 ====================
 
+    /**
+     * Cache-stable platform identity, appended to every agent's system
+     * prompt. Answers "who are you / what are you based on". The volatile
+     * "which model right now" fact is injected per-turn by
+     * {@link vip.mate.agent.context.RuntimeContextInjector} instead, to
+     * keep this prefix's prompt-cache hash stable.
+     */
+    static final String ABOUT_YOU_BLOCK = """
+
+            ## About You
+            You are powered by MateClaw — a multi-user AI Agent platform built on
+            Spring Boot 3.5 and Spring AI Alibaba Graph. You are reachable through
+            WebChat and 8+ IM channels (DingTalk, Feishu, WeCom, WeChat, Telegram,
+            Discord, QQ, Slack). If asked who you are or what you are based on,
+            answer with MateClaw and the technology stack above.
+            """;
+
     private String buildEnhancedPrompt(AgentEntity entity, boolean builtinSearchEnabled) {
         // The agent's own systemPrompt encodes its identity (role / goal /
         // backstory). The memory block from workspace files (AGENTS.md, SOUL.md,
@@ -1376,6 +1440,18 @@ public class AgentGraphBuilder {
                 Use workspace memory tools (MEMORY.md, daily notes) for long-form narrative notes.
                 Use structured memory tools for key-value facts the system can query efficiently.
 
+                ## Memory vs Knowledge Base Precedence
+                When a question is about the user themselves — who they are, their current
+                project, its name/codename, tech stack, goals, metrics, budget, team, or what
+                they are working on — your recalled memory (the <memory-context> block plus
+                structured/workspace memory) is the authoritative source. Knowledge-base / wiki
+                pages are reference material that may describe unrelated, example, or upstream
+                projects; do NOT treat a KB page's subject as the user's own project. Only read
+                the knowledge base for explicit reference lookups, never to decide what the
+                user's project is. If memory and a KB page disagree about the user's project,
+                trust memory. If memory has no answer, say you do not have it rather than
+                adopting a KB article as the user's project.
+
                 ## Session Search
                 - `session_search(agentId, currentConversationId, mode, query, limit)` — search conversation history
                 - mode="recent": list recent conversations (titles, times, message counts)
@@ -1444,7 +1520,7 @@ public class AgentGraphBuilder {
         // Wiki 知识库上下文注入
         String wikiContext = wikiContextService.buildWikiContext(entity.getId());
 
-        return basePrompt + toolGuidance + searchGuidance + wikiContext;
+        return basePrompt + ABOUT_YOU_BLOCK + toolGuidance + searchGuidance + wikiContext;
     }
 
     /**
